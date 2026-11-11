@@ -29,6 +29,9 @@ from backtesting import walkforward_scores
 from model_explainer import describe_logistic_model
 from market_calendar import is_krx_holiday
 from market_ui import make_rows, order_rows, market_table_html, watch_card_html, css as market_css
+from stock_catalog import CATALOG, DEFAULT_SELECTED, STOCK_SECTORS, filter_catalog
+from langchain_analysis import ai_ready, analyze_news_ai, explain_prediction_ai
+from news_store import load_news, merge_news
 from kis_market import (
     KISReadOnlyClient, fetch_kis_historical, kis_credentials_ready, fetch_kis_trade_volume,
 )
@@ -274,7 +277,10 @@ with st.sidebar:
     selection: dict[str, str] = {}
     uploads = []
     if mode == '국내 주식 실데이터':
-        chosen = st.multiselect('분석 종목', list(STOCKS), default=list(STOCKS), max_selections=6)
+        chosen = st.multiselect('분석 종목 (30개 중 최대 6개)', list(STOCKS),
+                                default=DEFAULT_SELECTED, max_selections=6,
+                                help='30개를 한꺼번에 조회하면 API 호출 제한과 지연이 발생할 수 있습니다.')
+        st.caption(f'관심종목 {len(STOCKS)}개 중 {len(chosen)}개 선택 · 가격은 선택한 종목만 다운로드')
         selection.update({name: STOCKS[name] for name in chosen})
         extra = st.text_input('추가 종목코드(6자리)', placeholder='예: 005930')
         if extra:
@@ -409,6 +415,8 @@ if mode == '국내 주식 실데이터' and page == '홈 대시보드':
 news_key = f'{mode}|{selected_code or selected_name}'
 if 'news_by_symbol' not in st.session_state:
     st.session_state['news_by_symbol'] = {}
+if selected_code and news_key not in st.session_state['news_by_symbol']:
+    st.session_state['news_by_symbol'][news_key] = load_news(selected_code)
 
 if page == '홈 대시보드':
     st.markdown('<div class="mp-market-title">관심 종목 한눈에 보기</div>', unsafe_allow_html=True)
@@ -436,6 +444,14 @@ if page == '홈 대시보드':
 
 elif page == '국내 시세 보드':
     st.markdown('<div class="mp-market-title">국내 주식 시세 · 종목 비교</div>', unsafe_allow_html=True)
+    with st.expander('추가 가능한 국내 30개 종목 전체 목록', expanded=False):
+        query_catalog = st.text_input('목록 검색 (이름 또는 코드)', key='catalog_q')
+        sectors = ['전체'] + sorted(set(STOCK_SECTORS.values()))
+        sector = st.selectbox('업종 구분', sectors, key='catalog_sector')
+        st.dataframe(pd.DataFrame(filter_catalog(query_catalog, sector),
+                     columns=['종목명', '종목코드', '분류']), hide_index=True,
+                     use_container_width=True)
+        st.caption('목록은 가격 데이터가 아니라 종목코드 안내입니다. 상장/변경 여부는 조회 시 확인됩니다.')
     st.markdown('<div class="mp-section-sub">선택한 종목의 실제 마지막 거래일 종가 기준 · 시장 전체 순위가 아닙니다.</div>', unsafe_allow_html=True)
     rows = make_rows({name: raw_data[name] for name in results}, source_meta, selection)
     f1, f2 = st.columns([.72, 1.28])
@@ -533,83 +549,178 @@ elif page == '급변 탐지':
     st.plotly_chart(theme_plot(fig, 310), use_container_width=True)
 
 elif page == '뉴스·공시':
-    st.markdown('#### 뉴스 · 공시 분석')
+    st.markdown('#### 실제 금융 뉴스 · 기업 공시')
+    st.caption('네이버 뉴스 검색 API가 반환한 기사 **제목·검색 요약·URL·공개 시각**만 사용합니다. 유료 기사 원문을 무단 수집하지 않습니다.')
     status = secret_status()
-    st.caption('네이버 뉴스 API와 OpenDART 키가 설정된 경우에만 자동 조회가 가능합니다.')
-    c1, c2, c3 = st.columns([1,1,1.2])
+    st.caption('연결 상태 · NAVER 뉴스: ' + ('설정 완료' if status['NAVER_CLIENT_ID'] and status['NAVER_CLIENT_SECRET'] else '키 없음')
+               + ' · OpenDART: ' + ('설정 완료' if status['DART_API_KEY'] else '키 없음')
+               + ' · LangChain AI: ' + ('설정 완료' if ai_ready() else '키 없음'))
+    if not selected_code:
+        st.info('뉴스 자동 수집과 캐시는 국내 주식 실데이터 모드에서 종목을 선택해 주세요.')
+    c1, c2 = st.columns(2)
     with c1:
-        if st.button('네이버 뉴스 가져오기', disabled=not (status['NAVER_CLIENT_ID'] and status['NAVER_CLIENT_SECRET'])):
+        if st.button('최신 실제 뉴스 가져오기', disabled=(not selected_code) or not
+                     (status['NAVER_CLIENT_ID'] and status['NAVER_CLIENT_SECRET']),
+                     use_container_width=True):
             try:
-                news_result = fetch_naver_news(selected_name, selected_code)
-                st.session_state['news_by_symbol'][news_key] = news_result
-                st.success(f'{len(news_result)}건 수집')
-            except Exception:
-                st.error('뉴스 조회 실패')
+                with st.spinner('네이버 검색 API에서 뉴스 제목·요약을 확인합니다...'):
+                    downloaded = fetch_naver_news(selected_name, selected_code, display=40)
+                    saved = merge_news(selected_code, downloaded)
+                    st.session_state['news_by_symbol'][news_key] = saved
+                st.success(f'실제 뉴스 {len(downloaded)}건 조회 · 이전 수집 정보 포함 {len(saved)}건')
+            except Exception as exc:
+                st.error(f'뉴스 조회에 실패했습니다: {type(exc).__name__}: {str(exc)[:170]}')
     with c2:
-        if selected_code and st.button('OpenDART 공시 가져오기', disabled=not status['DART_API_KEY']):
+        if st.button('기업 공시 조회', disabled=(not selected_code) or not status['DART_API_KEY'],
+                     use_container_width=True):
             try:
-                filings = fetch_disclosures(selected_code, (end - timedelta(days=100)).isoformat(), end.isoformat())
-                old = st.session_state['news_by_symbol'].get(news_key, pd.DataFrame())
-                st.session_state['news_by_symbol'][news_key] = normalize_articles(pd.concat([old, filings], ignore_index=True))
-                st.success(f'공시 {len(filings)}건 확인')
-            except Exception:
-                st.error('공시 조회 실패')
-    with c3:
-        upload_news = st.file_uploader('뉴스 메타데이터 CSV 업로드', type='csv', key='news_upload_sidebar')
-        if upload_news and st.button('업로드 뉴스 적용'):
+                with st.spinner('공시자료 조회 중...'):
+                    filings = fetch_disclosures(selected_code, (end - timedelta(days=100)).isoformat(), end.isoformat())
+                previous = st.session_state['news_by_symbol'].get(news_key, pd.DataFrame())
+                combined = normalize_articles(pd.concat([previous, filings], ignore_index=True))
+                st.session_state['news_by_symbol'][news_key] = combined
+                st.success(f'공시 자료 {len(filings)}건 조회')
+            except Exception as exc:
+                st.error(f'공시 조회 실패: {type(exc).__name__}: {str(exc)[:170]}')
+    with st.expander('기존 뉴스 CSV 가져오기', expanded=False):
+        upload_news = st.file_uploader('뉴스 메타데이터 CSV', type='csv', key='news_csv_input')
+        if upload_news and st.button('뉴스 CSV 적용'):
             try:
                 st.session_state['news_by_symbol'][news_key] = read_news_csv(upload_news.getvalue())
-                st.success('업로드 완료')
+                st.success('업로드한 자료가 적용되었습니다. 출처와 최초 확인 시각은 사용자가 확인해야 합니다.')
             except Exception as exc:
-                st.error(f'CSV 형식 오류: {exc}')
+                st.error(f'CSV 형식 확인 필요: {exc}')
     current_news = st.session_state['news_by_symbol'].get(news_key, pd.DataFrame())
     if current_news is not None and not current_news.empty:
         analyzed_news = analyze_articles(current_news)
-        topic = st.selectbox('분류 필터', ['전체'] + sorted(analyzed_news['topic'].dropna().unique().tolist()))
+        news_topics = ['전체'] + sorted(analyzed_news['topic'].dropna().unique().tolist())
+        topic = st.selectbox('기사 유형', news_topics)
         shown = analyzed_news if topic == '전체' else analyzed_news[analyzed_news['topic'] == topic]
-        cols = ['published_at','title','publisher','topic','sentiment_label','sentiment_score','evidence','source_url']
-        cols = [c for c in cols if c in shown.columns]
-        st.dataframe(shown[cols], use_container_width=True, hide_index=True)
-        st.download_button('뉴스 분석 CSV 저장', csv_bytes(analyzed_news), 'market_pulse_news.csv', 'text/csv')
-        st.caption('과거 기사라도 오늘 처음 수집했다면 과거 예측에 소급해 사용할 수 없습니다.')
+        shown = shown.sort_values('published_at', ascending=False)
+        st.markdown('##### 기사 목록 · 실제 API/업로드 출처')
+        columns = ['published_at', 'title', 'publisher', 'topic',
+                   'sentiment_label', 'sentiment_score', 'first_seen_at', 'source_url']
+        st.dataframe(shown[columns], use_container_width=True, hide_index=True,
+                     column_config={'source_url': st.column_config.LinkColumn('기사 원문 링크')})
+        st.caption('위 감성 점수는 키워드 규칙 분류 결과이며 주가 상승 확률이 아닙니다.')
+        st.download_button('기사 메타데이터·감성 분석 CSV', csv_bytes(analyzed_news),
+                           file_name='market_pulse_news.csv', mime='text/csv')
+        st.markdown('##### Grok 뉴스 분석')
+        st.caption('별도 LLM API 연결 시 실제 검색된 최근 기사 최대 12건의 제목·요약을 정성 분석합니다. API 사용 비용이 발생할 수 있습니다.')
+        news_fingerprint = int(pd.util.hash_pandas_object(
+            analyzed_news[['article_id', 'title', 'description', 'published_at']].astype(str), index=False).sum())
+        brief_key = (news_key, news_fingerprint)
+        if st.button('Grok으로 기사 근거 분석', disabled=not ai_ready(), type='primary'):
+            try:
+                with st.spinner('기사 내용을 참고해 AI 분석을 작성합니다...'):
+                    st.session_state['news_llm_brief'] = analyze_news_ai(selected_name, analyzed_news)
+                    st.session_state['news_llm_brief_key'] = brief_key
+            except Exception as exc:
+                st.error(f'LangChain 실행 실패: {type(exc).__name__}: {str(exc)[:200]}')
+        if st.session_state.get('news_llm_brief_key') == brief_key:
+            brief = st.session_state['news_llm_brief']
+            st.write(f"**기사 관점:** {brief['sentiment']} · {brief['overview']}")
+            n1, n2 = st.columns(2)
+            with n1:
+                st.markdown('**긍정적인 내용**')
+                for line in brief['positive_factors']:
+                    st.write('• ' + line)
+            with n2:
+                st.markdown('**부정적인 내용**')
+                for line in brief['negative_factors']:
+                    st.write('• ' + line)
+            if brief['uncertainties']:
+                st.markdown('**판단의 한계**')
+                for line in brief['uncertainties']:
+                    st.write('• ' + line)
+            st.markdown('**분석 근거 기사**')
+            for item in brief['sources']:
+                st.write(f"[{item['number']}] {item['title']} · {item['published_at']}")
+                if item['url']:
+                    st.link_button(f"기사 {item['number']} 확인", item['url'])
+            st.caption(brief['method'])
+        elif not ai_ready():
+            st.info('LangChain 기능을 사용하려면 XAI_API_KEY가 필요합니다. 키 없이도 실제 기사 조회와 규칙 기반 분석은 사용할 수 있습니다.')
     else:
-        st.info('현재 표시할 뉴스 데이터가 없습니다.')
+        st.info('아직 뉴스가 없습니다. 네이버 API 키를 설정하고 실제 뉴스를 수집해 주세요. 가상 기사를 표시하지 않습니다.')
 
 elif page == 'AI 예측':
-    st.markdown('#### AI 예측 실험실')
+    st.markdown('#### 통계 모델 + LangChain 뉴스 시나리오')
     current_news = st.session_state['news_by_symbol'].get(news_key, pd.DataFrame())
     price_fingerprint = int(pd.util.hash_pandas_object(selected_raw[['Date', 'Close', 'Volume']], index=False).sum())
-    news_fingerprint = int(pd.util.hash_pandas_object(current_news[['title', 'published_at', 'first_seen_at']].fillna('').astype(str), index=False).sum()) if current_news is not None and not current_news.empty else 0
-    prediction_identity = (news_key, meta.get('last_trade_date'), len(selected_raw), win, price_fingerprint, news_fingerprint)
-    st.info('다음 거래일 종가 상승 확률을 탐색적으로 계산합니다. 투자 판단용이 아닙니다.')
-    if st.button('AI 예측 계산 실행', type='primary'):
+    news_fingerprint = (int(pd.util.hash_pandas_object(
+        current_news[['article_id', 'title', 'description', 'published_at', 'first_seen_at']].fillna('').astype(str), index=False).sum())
+        if current_news is not None and not current_news.empty else 0)
+    prediction_identity = (news_key, meta.get('last_trade_date'), len(selected_raw), win,
+                           price_fingerprint, news_fingerprint)
+    st.info('**숫자 상승 확률은 과거 가격·거래량 기반 시계열 모델이 계산합니다.** LangChain은 최신 기사와 모델 결과를 읽고 정성적 시나리오를 작성합니다. AI 문장이 별도 검증된 예측치는 아닙니다.')
+    if meta.get('status') == 'cached':
+        st.warning('이전 캐시 기반 예측입니다. 데이터의 마지막 거래일을 확인하세요.')
+    st.caption('뉴스 수집을 오늘 처음 시작했다면 과거 뉴스로 모델을 백테스트한 것으로 간주하지 않습니다.')
+    if st.button('1. 정량 모델 학습·검증 및 예측', type='primary'):
         try:
-            evaluation = run_experiments(selected_raw, news=current_news)
+            with st.spinner('시간순 학습·검증·시험 데이터를 계산합니다...'):
+                evaluation = run_experiments(selected_raw, news=current_news)
             st.session_state['prediction_result'] = evaluation
             st.session_state['prediction_identity'] = prediction_identity
         except Exception as exc:
-            st.error(f'예측 계산 실패: {exc}')
+            st.session_state.pop('prediction_result', None)
+            st.error(f'시계열 예측 계산 실패: {exc}')
     if st.session_state.get('prediction_identity') == prediction_identity and 'prediction_result' in st.session_state:
         p = st.session_state['prediction_result']
         st.warning(p.news_note)
-        st.dataframe(p.forecasts.style.format({'상승 추정 확률':'{:.1%}', '평가 Brier':'{:.4f}'}), use_container_width=True, hide_index=True)
-        st.dataframe(p.summary.style.format({'정확도':'{:.1%}','정밀도':'{:.1%}','재현율':'{:.1%}','F1':'{:.3f}','Brier':'{:.4f}','기준 Brier':'{:.4f}'}), use_container_width=True, hide_index=True)
-        try:
-            best = '기술 지표 포함' if '기술 지표 포함' in p.evaluations else list(p.evaluations)[0]
-            ev = p.evaluations[best]
-            from feature_engineering import usable_history
-            from backtesting import _predictor
-            tbl = usable_history(p.history, ev.feature_names)
-            fitted = _predictor().fit(tbl[ev.feature_names].replace([np.inf,-np.inf], np.nan), tbl['TargetUp'].astype(int))
-            factors = describe_logistic_model(fitted, ev.feature_names, p.history.tail(1).replace([np.inf,-np.inf], np.nan))
-            st.markdown('##### 변수 기여도')
-            st.dataframe(factors.head(8), use_container_width=True, hide_index=True)
-        except Exception:
-            st.caption('변수 기여도를 표시할 수 없습니다.')
-        st.download_button('AI 예측 CSV 저장', csv_bytes(with_provenance(p.forecasts, source_meta, selected_name)), 'market_pulse_predictions.csv', 'text/csv')
-        st.download_button('모델 성능 CSV 저장', csv_bytes(with_provenance(p.summary, source_meta, selected_name)), 'market_pulse_model_scores.csv', 'text/csv')
+        st.markdown('##### 다음 거래일 상승 확률 추정 (미보정)')
+        st.dataframe(p.forecasts.style.format({'상승 추정 확률':'{:.1%}', '평가 Brier':'{:.4f}'}),
+                     use_container_width=True, hide_index=True)
+        st.markdown('##### 시험 구간 모델 검증')
+        st.dataframe(p.summary.style.format({'정확도':'{:.1%}', '정밀도':'{:.1%}',
+                      '재현율':'{:.1%}', 'F1':'{:.3f}', 'Brier':'{:.4f}',
+                      '기준 Brier':'{:.4f}'}), use_container_width=True, hide_index=True)
+        st.caption('Brier 오차가 기준 모델보다 클 경우 해당 시험 기간의 예측력 개선을 확인하지 못한 것입니다.')
+        st.download_button('확률 예측 CSV', csv_bytes(with_provenance(p.forecasts, source_meta, selected_name)),
+                           file_name='market_pulse_predictions.csv', mime='text/csv')
+        st.download_button('모델 성능 CSV', csv_bytes(with_provenance(p.summary, source_meta, selected_name)),
+                           file_name='market_pulse_model_scores.csv', mime='text/csv')
+        st.markdown('##### 2. Grok 정성 예측 시나리오')
+        st.caption('현재 뉴스에는 모델 기준 거래일 **이후** 공개된 기사가 포함될 수 있습니다. 이는 정성적 추가 설명일 뿐 과거 수치 예측에 소급 반영한 데이터가 아닙니다. 별도 API 과금이 발생할 수 있습니다.')
+        if st.button('Grok 시나리오 생성', disabled=not ai_ready() or p.forecasts.empty):
+            try:
+                chosen_model = '기술 지표 포함' if '기술 지표 포함' in p.forecasts['모델'].tolist() else p.forecasts.iloc[0]['모델']
+                fc = p.forecasts[p.forecasts['모델'] == chosen_model].iloc[0].to_dict()
+                matching = p.summary[p.summary['모델'] == chosen_model]
+                metrics = matching.iloc[0].to_dict() if not matching.empty else {}
+                with st.spinner('뉴스와 검증 결과를 이용해 시나리오를 작성합니다...'):
+                    brief = explain_prediction_ai(selected_name, fc, metrics, current_news)
+                st.session_state['forecast_llm_brief'] = brief
+                st.session_state['forecast_llm_id'] = prediction_identity
+            except Exception as exc:
+                st.error(f'Grok 시나리오 실패: {type(exc).__name__}: {str(exc)[:200]}')
+        if st.session_state.get('forecast_llm_id') == prediction_identity:
+            brief = st.session_state['forecast_llm_brief']
+            st.write(f"**정성 시나리오:** {brief['scenario']}")
+            st.write(brief['interpretation'])
+            t1, t2 = st.columns(2)
+            with t1:
+                st.markdown('**상승 시나리오 요인**')
+                for line in brief['upward_factors']:
+                    st.write('• ' + line)
+            with t2:
+                st.markdown('**하락 시나리오 요인**')
+                for line in brief['downward_factors']:
+                    st.write('• ' + line)
+            st.markdown('**해석의 한계**')
+            for line in brief['limitations']:
+                st.write('• ' + line)
+            st.markdown('**참고한 실제 기사**')
+            for item in brief['sources']:
+                st.write(f"[{item['number']}] {item['title']}")
+                if item['url']:
+                    st.link_button(f"기사 {item['number']} 보기", item['url'])
+            st.caption(brief['method'])
+        elif not ai_ready():
+            st.caption('XAI_API_KEY를 설정하면 Grok 시나리오 버튼을 사용할 수 있습니다.')
     else:
-        st.caption('버튼을 눌러 예측을 계산하세요.')
+        st.caption('먼저 정량 모델 실행 버튼을 눌러 실제 수집된 가격 데이터로 모델을 검증하세요.')
 
 elif page == '백테스트':
     st.markdown('#### 시계열 백테스트')
@@ -638,6 +749,10 @@ elif page == '백테스트':
         st.info('먼저 AI 예측 탭에서 예측을 계산하세요.')
 
 elif page == '데이터 센터':
+    st.markdown('#### 30개 국내 종목 카탈로그')
+    st.dataframe(pd.DataFrame(CATALOG, columns=['종목명','종목코드','업종']),
+                 hide_index=True, use_container_width=True)
+    st.caption('30개 종목 코드는 조회 대상으로 등록된 목록이며 가격 기록 자체가 아닙니다.')
     st.markdown('#### 데이터 출처 및 설명')
     provenance = pd.DataFrame([{'종목': name, **source_meta[name]} for name in raw_data])
     st.dataframe(provenance, use_container_width=True, hide_index=True)

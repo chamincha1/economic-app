@@ -16,10 +16,7 @@ TODAY = date.today()
 DEFAULT_START = TODAY - timedelta(days=365 * 3)
 DEFAULT_END = TODAY
 NEWS_LIMIT = 40
-STOCKS = {
-    '삼성전자': '005930', 'SK하이닉스': '000660', '현대자동차': '005380',
-    '기아': '000270', 'NAVER': '035420', '카카오': '035720'
-}
+from stock_catalog import STOCKS, STOCK_SECTORS, DEFAULT_SELECTED
 INDICES = {'KOSPI': 'KS11', 'KOSDAQ': 'KQ11'}
 
 
@@ -36,4 +33,4 @@ def get_secret(key: str) -> str:
 
 def secret_status() -> dict[str, bool]:
     return {k: bool(get_secret(k)) for k in
-            ('NAVER_CLIENT_ID', 'NAVER_CLIENT_SECRET', 'DART_API_KEY', 'KIS_APP_KEY', 'KIS_APP_SECRET')}
+            ('NAVER_CLIENT_ID', 'NAVER_CLIENT_SECRET', 'DART_API_KEY', 'KIS_APP_KEY', 'KIS_APP_SECRET', 'XAI_API_KEY')}

@@ -1,6 +1,7 @@
 """Preload daily domestic stock history; real remote connectivity required."""
 from __future__ import annotations
 import argparse
+import time
 from datetime import date, timedelta
 from market_data import fetch_historical
 from kis_market import fetch_kis_historical
@@ -11,7 +12,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description='MARKET PULSE 국내 일별 주가 저장')
     parser.add_argument('--start', default=(date.today() - timedelta(days=365 * 3)).isoformat())
     parser.add_argument('--end', default=date.today().isoformat())
-    parser.add_argument('--only', nargs='*', help='수집할 6자리 종목코드; 기본 6개')
+    parser.add_argument('--only', nargs='*', help='수집할 6자리 종목코드. 지정하지 않으면 기본 6개')
+    parser.add_argument('--all-30', action='store_true', help='30개 종목 조회(호출 제한을 고려해 천천히 실행)')
     parser.add_argument('--provider',choices=['fdr','kis'],default='fdr',
                         help='fdr: NAVER→KRX, kis: 인증이 필요한 한국투자증권 조회 전용 API')
     parser.add_argument('--market',choices=['J','NX','UN'],default='J',
@@ -20,9 +22,13 @@ def main(argv=None) -> int:
                         help='KIS 원주가 사용. 지정하지 않으면 KIS 기간별시세의 수정주가 옵션 사용')
     args = parser.parse_args(argv)
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
-    codes = args.only if args.only else list(STOCKS.values())
+    original_six = ['005930', '000660', '005380', '000270', '035420', '035720']
+    codes = args.only if args.only else (list(STOCKS.values()) if args.all_30 else original_six)
+    codes = list(dict.fromkeys(codes))
     failures = []
-    for code in codes:
+    for ix, code in enumerate(codes):
+        if ix and args.all_30 and not args.only:
+            time.sleep(1.0)  # Rate-limit courtesy when collecting 30 stocks.
         try:
             if args.provider == 'kis':
                 result = fetch_kis_historical(code, start, end,

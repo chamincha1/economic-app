@@ -1,6 +1,6 @@
 [project]
 name = "market-pulse-kr"
-version = "2.0.0"
+version = "2.1.0"
 description = "Educational Korean stock EOD analytics, news and probabilistic backtests"
 requires-python = ">=3.10"
 readme = "README.md"

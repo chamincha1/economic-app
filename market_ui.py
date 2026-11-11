@@ -17,10 +17,9 @@ import pandas as pd
 from market_data import price_snapshot
 
 ASSETS = Path(__file__).resolve().parent / 'assets' / 'company_icons'
-COMPANY_CODES = {
-    '삼성전자': '005930', 'SK하이닉스': '000660', '현대자동차': '005380',
-    '기아': '000270', 'NAVER': '035420', '카카오': '035720',
-}
+from stock_catalog import STOCKS
+COMPANY_CODES = STOCKS
+
 MAIN_COLUMNS = ('종목', '최근 종가', '전일 대비', '등락률', '거래량', '52주 최고', '52주 최저', '기준일')
 
 
