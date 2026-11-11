@@ -7,7 +7,8 @@ import pytest
 
 from market_data import (
     HistoricalPrices, fetch_historical_prices, save_historical_cache,
-    read_historical_cache, format_origin,
+    read_historical_cache, format_origin, fetch_krx_large_cap_universe,
+    fallback_large_cap_universe,
 )
 from stock_core import StockDataError, calculate_indicators, trim_period
 
@@ -106,3 +107,21 @@ def test_real_collection_output_compatible_with_stock_analysis():
     output = trim_period(analyzed, '2025-01-01', '2025-03-31')
     assert len(output) > 10
     assert output['Scorable'].any()
+
+
+def test_krx_universe_is_ranked_and_limited():
+    listing = pd.DataFrame({
+        'Code': ['005930', '000660', '000001', '035420'],
+        'Name': ['삼성전자', 'SK하이닉스', '제외종목', 'NAVER'],
+        'Market': ['KOSPI', 'KOSPI', 'KONEX', 'KOSPI'],
+        'Marcap': [100, 90, 999, 80],
+    })
+    result = fetch_krx_large_cap_universe(2, listing_reader=lambda _: listing)
+    assert result['종목'].tolist() == ['삼성전자', 'SK하이닉스']
+    assert result['순위'].tolist() == [1, 2]
+
+
+def test_fallback_universe_has_50_analysable_codes():
+    result = fallback_large_cap_universe()
+    assert len(result) == 50
+    assert result['종목코드'].str.fullmatch(r'\d{6}').all()

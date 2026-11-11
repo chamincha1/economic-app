@@ -20,11 +20,106 @@ from stock_core import StockDataError, clean_data, read_csv_bytes
 PROVIDERS = ("NAVER", "KRX")
 REQUIRED_COLUMNS = ("Date", "Open", "High", "Low", "Close", "Volume")
 
+# This list is deliberately a *fallback*, not a market-cap ranking.  The app
+# refreshes the actual order from KRX through FinanceDataReader when available.
+# Keeping a broad local list means a temporary KRX listing outage never removes
+# the user's ability to analyse well-known large Korean companies.
+FALLBACK_LARGE_CAP_STOCKS = (
+    ("삼성전자", "005930", "KOSPI"), ("SK하이닉스", "000660", "KOSPI"),
+    ("LG에너지솔루션", "373220", "KOSPI"), ("삼성바이오로직스", "207940", "KOSPI"),
+    ("현대자동차", "005380", "KOSPI"), ("기아", "000270", "KOSPI"),
+    ("KB금융", "105560", "KOSPI"), ("셀트리온", "068270", "KOSPI"),
+    ("NAVER", "035420", "KOSPI"), ("신한지주", "055550", "KOSPI"),
+    ("삼성물산", "028260", "KOSPI"), ("삼성생명", "032830", "KOSPI"),
+    ("삼성SDI", "006400", "KOSPI"), ("POSCO홀딩스", "005490", "KOSPI"),
+    ("LG화학", "051910", "KOSPI"), ("현대모비스", "012330", "KOSPI"),
+    ("한화에어로스페이스", "012450", "KOSPI"), ("HD현대중공업", "329180", "KOSPI"),
+    ("HD한국조선해양", "009540", "KOSPI"), ("두산에너빌리티", "034020", "KOSPI"),
+    ("한화오션", "042660", "KOSPI"), ("현대로템", "064350", "KOSPI"),
+    ("카카오", "035720", "KOSPI"), ("삼성전기", "009150", "KOSPI"),
+    ("LG전자", "066570", "KOSPI"), ("SK이노베이션", "096770", "KOSPI"),
+    ("KT", "030200", "KOSPI"), ("KT&G", "033780", "KOSPI"),
+    ("고려아연", "010130", "KOSPI"), ("한국전력", "015760", "KOSPI"),
+    ("SK텔레콤", "017670", "KOSPI"), ("삼성화재", "000810", "KOSPI"),
+    ("우리금융지주", "316140", "KOSPI"), ("하나금융지주", "086790", "KOSPI"),
+    ("기업은행", "024110", "KOSPI"), ("삼성중공업", "010140", "KOSPI"),
+    ("HD현대일렉트릭", "267260", "KOSPI"), ("크래프톤", "259960", "KOSPI"),
+    ("하이브", "352820", "KOSPI"), ("대한항공", "003490", "KOSPI"),
+    ("에코프로비엠", "247540", "KOSDAQ"), ("에코프로", "086520", "KOSDAQ"),
+    ("알테오젠", "196170", "KOSDAQ"), ("HLB", "028300", "KOSDAQ"),
+    ("레인보우로보틱스", "277810", "KOSDAQ"), ("삼천당제약", "000250", "KOSDAQ"),
+    ("펄어비스", "263750", "KOSDAQ"), ("휴젤", "145020", "KOSDAQ"),
+    ("파마리서치", "214450", "KOSDAQ"), ("클래시스", "214150", "KOSDAQ"),
+)
+
 
 @dataclass
 class HistoricalPrices:
     frame: pd.DataFrame
     provider: str
+
+
+def fallback_large_cap_universe(limit: int = 50) -> pd.DataFrame:
+    """Return a usable 50-stock selection when KRX's listing service is down."""
+    rows = [
+        {"순위": i, "종목": name, "종목코드": code, "시장": market, "시가총액": None}
+        for i, (name, code, market) in enumerate(FALLBACK_LARGE_CAP_STOCKS[:limit], start=1)
+    ]
+    return pd.DataFrame(rows)
+
+
+def fetch_krx_large_cap_universe(
+    limit: int = 50,
+    *,
+    listing_reader: Callable | None = None,
+) -> pd.DataFrame:
+    """Fetch the current KRX market-cap ranking for KOSPI and KOSDAQ.
+
+    The function is intentionally separate from historical price collection so
+    callers can fall back to a clearly labelled local list if the KRX listing
+    endpoint is unavailable.  The returned ranking reflects the provider's
+    latest available trading-day snapshot, not intraday prices.
+    """
+    if limit < 1:
+        raise StockDataError("가져올 종목 수는 1개 이상이어야 합니다.")
+    if listing_reader is None:
+        try:
+            import FinanceDataReader as fdr
+        except ImportError as exc:
+            raise StockDataError("FinanceDataReader가 설치되지 않았습니다. requirements.txt를 설치하세요.") from exc
+        listing_reader = fdr.StockListing
+    try:
+        listing = listing_reader("KRX")
+    except Exception as exc:
+        raise StockDataError(f"KRX 상장목록을 가져오지 못했습니다: {type(exc).__name__}: {str(exc)[:180]}") from exc
+    if not isinstance(listing, pd.DataFrame) or listing.empty:
+        raise StockDataError("KRX 상장목록이 비어 있습니다.")
+
+    columns = {str(col).strip().lower(): col for col in listing.columns}
+    code_col = columns.get("code") or columns.get("symbol")
+    name_col = columns.get("name") or columns.get("종목명")
+    market_col = columns.get("market") or columns.get("marketname") or columns.get("시장구분")
+    cap_col = columns.get("marcap") or columns.get("marketcap") or columns.get("시가총액")
+    if not all((code_col, name_col, market_col, cap_col)):
+        raise StockDataError("KRX 상장목록에 종목코드·종목명·시장·시가총액 열이 없습니다.")
+
+    universe = listing[[code_col, name_col, market_col, cap_col]].copy()
+    universe.columns = ["종목코드", "종목", "시장", "시가총액"]
+    universe["종목코드"] = universe["종목코드"].astype(str).str.extract(r"(\d{6})", expand=False)
+    universe["시가총액"] = pd.to_numeric(universe["시가총액"], errors="coerce")
+    universe["시장"] = universe["시장"].astype(str).str.upper()
+    universe = universe[
+        universe["종목코드"].notna()
+        & universe["종목"].notna()
+        & universe["시장"].isin(["KOSPI", "KOSDAQ"])
+        & universe["시가총액"].gt(0)
+    ]
+    universe = universe.sort_values("시가총액", ascending=False).drop_duplicates("종목코드")
+    universe = universe.head(limit).reset_index(drop=True)
+    if universe.empty:
+        raise StockDataError("시가총액이 있는 KOSPI/KOSDAQ 종목을 찾지 못했습니다.")
+    universe.insert(0, "순위", range(1, len(universe) + 1))
+    return universe
 
 
 def _as_date(value: date | str) -> date:

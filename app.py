@@ -18,7 +18,8 @@ from stock_core import (
     read_csv_bytes, summarize, trim_period,
 )
 from market_data import (
-    fetch_historical_prices, format_origin,
+    fallback_large_cap_universe, fetch_historical_prices,
+    fetch_krx_large_cap_universe, format_origin,
     read_historical_cache, save_historical_cache,
 )
 
@@ -97,6 +98,15 @@ def online_cached(code: str, start_iso: str, end_iso: str):
             "collected_at_utc": "저장 실패",
         }
     return prices, metadata
+
+
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def market_universe_cached() -> tuple[pd.DataFrame, str]:
+    """Use the latest KRX ranking when possible, with a visible safe fallback."""
+    try:
+        return fetch_krx_large_cap_universe(50), "KRX 시가총액 상위 50개 · 최근 거래일 기준"
+    except StockDataError:
+        return fallback_large_cap_universe(50), "기본 대형주 50개 목록 · KRX 순위 조회 실패로 순위는 갱신되지 않음"
 
 
 def load_online(name: str, code: str, start: date, end: date) -> tuple[pd.DataFrame, str]:
@@ -185,6 +195,23 @@ def plot_drawdown(df: pd.DataFrame):
     return chart_base(fig, 270)
 
 
+def plot_returns(df: pd.DataFrame, name: str):
+    fig = go.Figure(go.Bar(
+        x=df["Date"], y=df["ReturnPct"], name="일일 수익률",
+        marker_color=[C_AQUA if value >= 0 else C_RED for value in df["ReturnPct"].fillna(0)],
+        hovertemplate="%{x|%Y-%m-%d}<br>일일 수익률: %{y:.2f}%<extra></extra>",
+    ))
+    fig.update_layout(title=f"{name} · 일일 수익률", yaxis_title="수익률 (%)")
+    return chart_base(fig, 430)
+
+
+def plot_volume(df: pd.DataFrame, name: str):
+    colors = [C_RED if flag else C_BLUE for flag in df["VolumeJump"]]
+    fig = go.Figure(go.Bar(x=df["Date"], y=df["Volume"], name="거래량", marker_color=colors))
+    fig.update_layout(title=f"{name} · 거래량 (빨강: 급증 탐지)", yaxis_title="거래량")
+    return chart_base(fig, 430)
+
+
 def plot_sensitivity(raw: pd.DataFrame, start: date, end: date, window: int, q: float) -> go.Figure:
     limits = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
     counts = []
@@ -217,18 +244,61 @@ with st.sidebar:
     mode = st.radio("데이터 출처", ["국내 주식 실데이터", "예시 데이터 (인터넷 불필요)", "CSV 직접 업로드"],
                     help="예시 데이터는 프로그램 시연용 가상 자료입니다. 실제 주식 가격이 아닙니다.")
     st.divider()
-    start_date = st.date_input("분석 시작일", value=date.today() - timedelta(days=365 * 3), format="YYYY-MM-DD")
+    period_choice = st.selectbox("빠른 분석 기간", ["직접 지정", "1개월", "3개월", "6개월", "1년", "3년"], index=5)
+    days_by_period = {"1개월": 31, "3개월": 92, "6개월": 184, "1년": 365, "3년": 365 * 3}
+    preset_start = date.today() - timedelta(days=days_by_period.get(period_choice, 365 * 3))
+    start_date = st.date_input("분석 시작일", value=preset_start, format="YYYY-MM-DD")
     end_date = st.date_input("분석 종료일", value=date.today(), format="YYYY-MM-DD")
     window = st.slider("비교 기간 (거래일)", min_value=10, max_value=60, value=20, step=5)
     z_limit = st.slider("가격 급변 Z 기준", min_value=1.5, max_value=4.0, value=2.5, step=.5)
     q_limit = st.slider("거래량 급증 배율", min_value=1.2, max_value=3.0, value=1.5, step=.1)
     st.divider()
     uploads = None
+    selected_codes: dict[str, str] = {}
+    market_info = ""
     if mode == "국내 주식 실데이터":
-        names = st.multiselect("분석 기업 (최대 6개)", list(KR_STOCKS), default=list(KR_STOCKS), max_selections=6)
+        universe, market_info = market_universe_cached()
+        market_filter = st.radio("시장", ["전체", "KOSPI", "KOSDAQ"], horizontal=True)
+        search_term = st.text_input("종목 검색", placeholder="회사명 또는 6자리 종목코드")
+        visible_universe = universe.copy()
+        if market_filter != "전체":
+            visible_universe = visible_universe[visible_universe["시장"] == market_filter]
+        if search_term.strip():
+            needle = search_term.strip().lower()
+            visible_universe = visible_universe[
+                visible_universe["종목"].astype(str).str.lower().str.contains(needle, na=False)
+                | visible_universe["종목코드"].astype(str).str.contains(needle, na=False)
+            ]
+        label_to_code = {
+            f"{int(row['순위']):02d}. {row['종목']} ({row['종목코드']}) · {row['시장']}": str(row["종목코드"])
+            for _, row in visible_universe.iterrows()
+        }
+        default_labels = [
+            label for label in label_to_code
+            if any(f" {code})" in label for code in KR_STOCKS.values())
+        ]
+        selected_labels = st.multiselect(
+            "분석 기업 (최대 50개)", list(label_to_code), default=default_labels,
+            max_selections=50,
+            help="상위 50개 목록에서 필요한 종목만 고르세요. 많은 종목을 고르면 최초 수집 시간이 길어집니다.",
+        )
+        selected_codes = {
+            label.split(". ", 1)[1].rsplit(" (", 1)[0]: label_to_code[label]
+            for label in selected_labels
+        }
+        names = list(selected_codes)
+        with st.expander("시가총액 상위 50개 목록", expanded=False):
+            listed = visible_universe.copy()
+            if "시가총액" in listed:
+                listed["시가총액"] = listed["시가총액"].map(
+                    lambda value: f"{value:,.0f}원" if pd.notna(value) else "순위 조회 필요"
+                )
+            st.dataframe(listed, use_container_width=True, hide_index=True)
+        st.caption(market_info)
         st.caption("FinanceDataReader의 NAVER → KRX 경로로 과거 일별 시세를 가져옵니다. 장중 실시간 시세가 아닙니다. 제공처 장애 시 기존 저장 자료를 명시적으로 표시합니다.")
         if st.button("🔄 온라인 데이터 캐시 새로고침", use_container_width=True):
             online_cached.clear()
+            market_universe_cached.clear()
             st.rerun()
     elif mode == "예시 데이터 (인터넷 불필요)":
         demo = demo_cached()
@@ -262,7 +332,7 @@ elif mode == "국내 주식 실데이터":
     with st.spinner("국내 주식 시세를 확인하고 있습니다..."):
         for name in names:
             try:
-                raw_data[name], sources[name] = load_online(name, KR_STOCKS[name], start_date, end_date)
+                raw_data[name], sources[name] = load_online(name, selected_codes[name], start_date, end_date)
             except StockDataError as exc:
                 errors.append(str(exc))
 else:
@@ -290,7 +360,7 @@ if mode == "국내 주식 실데이터":
     with st.expander("🗂️ 실제 데이터 수집 현황 · 마지막 관측일 확인", expanded=True):
         st.dataframe(pd.DataFrame([{
             "기업": name,
-            "종목코드": KR_STOCKS[name],
+            "종목코드": selected_codes[name],
             "첫 거래일": frame["Date"].min().date().isoformat(),
             "마지막 거래일": frame["Date"].max().date().isoformat(),
             "거래일 수": len(frame),
@@ -343,8 +413,35 @@ with panel_overview:
         else:
             st.plotly_chart(plot_drawdown(next(iter(results.values()))), use_container_width=True)
     st.subheader("기업별 변동성 비교표")
-    st.dataframe(summary, use_container_width=True, hide_index=True)
-    st.download_button("⬇️ 기업별 비교표 CSV 저장", csv_data(summary), file_name="market_pulse_summary.csv", mime="text/csv")
+    if "favorite_stocks" not in st.session_state:
+        st.session_state.favorite_stocks = []
+    favourite_options = list(results)
+    st.session_state.favorite_stocks = st.multiselect(
+        "★ 관심 종목", favourite_options,
+        default=[name for name in st.session_state.favorite_stocks if name in favourite_options],
+        help="관심 종목은 이 브라우저를 닫기 전까지 유지됩니다.",
+    )
+    show_favourites = st.checkbox("관심 종목만 표에 표시", value=False)
+    sort_labels = {
+        "평균 변동성 높은 순": ("평균 일일변동성(%)", False),
+        "가격 급변 많은 순": ("가격급변(회)", False),
+        "거래량 급증 많은 순": ("거래량급증(회)", False),
+        "수익률 높은 순": ("기간수익률(%)", False),
+        "최대 낙폭 작은 순": ("최대낙폭 MDD(%)", False),
+    }
+    table_summary = summary.copy()
+    period_returns = {
+        name: round((frame["Close"].iloc[-1] / frame["Close"].iloc[0] - 1) * 100, 2)
+        for name, frame in results.items()
+    }
+    table_summary["기간수익률(%)"] = table_summary["종목"].map(period_returns)
+    sort_choice = st.selectbox("정렬", list(sort_labels))
+    sort_col, ascending = sort_labels[sort_choice]
+    table_summary = table_summary.sort_values(sort_col, ascending=ascending, na_position="last")
+    if show_favourites:
+        table_summary = table_summary[table_summary["종목"].isin(st.session_state.favorite_stocks)]
+    st.dataframe(table_summary, use_container_width=True, hide_index=True)
+    st.download_button("⬇️ 기업별 비교표 CSV 저장", csv_data(table_summary), file_name="market_pulse_summary.csv", mime="text/csv")
     png_chart_note()
 
 with panel_detail:
@@ -357,10 +454,17 @@ with panel_detail:
     m2.metric("가격 급변", f"{int(sel_row['가격급변(회)'])}회")
     m3.metric("거래량 급증", f"{int(sel_row['거래량급증(회)'])}회")
     m4.metric("최대 낙폭", f"{sel_row['최대낙폭 MDD(%)']:.2f}%")
-    st.plotly_chart(plot_price_and_vol(selected, chosen), use_container_width=True)
-    st.plotly_chart(plot_drawdown(selected), use_container_width=True)
+    chart_kind = st.radio("상세 차트", ["주가 · 변동성", "일일 수익률", "거래량", "최대 낙폭"], horizontal=True)
+    if chart_kind == "주가 · 변동성":
+        st.plotly_chart(plot_price_and_vol(selected, chosen), use_container_width=True)
+    elif chart_kind == "일일 수익률":
+        st.plotly_chart(plot_returns(selected, chosen), use_container_width=True)
+    elif chart_kind == "거래량":
+        st.plotly_chart(plot_volume(selected, chosen), use_container_width=True)
+    else:
+        st.plotly_chart(plot_drawdown(selected), use_container_width=True)
     st.download_button("⬇️ 이 종목 분석 데이터 CSV 저장", csv_data(selected),
-                       file_name=f"market_pulse_{KR_STOCKS.get(chosen, 'custom')}.csv", mime="text/csv")
+                       file_name=f"market_pulse_{selected_codes.get(chosen, KR_STOCKS.get(chosen, 'custom'))}.csv", mime="text/csv")
     png_chart_note()
 
 with panel_events:
