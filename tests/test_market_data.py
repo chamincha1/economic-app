@@ -92,9 +92,12 @@ def test_discard_invalid_ohlc_rows():
     frame = mock_ohlcv()
     frame.loc[21, 'Open'] = 0
     frame.loc[22, 'High'] = float('nan')
+    frame.loc[23, 'Low'] = 102  # impossible: low is above open/close
     prices = fetch_historical_prices('005930', '2025-01-01', '2025-03-31', reader=lambda *a: frame)
-    assert len(prices.frame) == (frame['Date'].dt.date <= date(2025, 3, 31)).sum() - 2
+    assert len(prices.frame) == (frame['Date'].dt.date <= date(2025, 3, 31)).sum() - 3
     assert (prices.frame['Open'] > 0).all()
+    assert (prices.frame['Low'] <= prices.frame[['Open', 'Close']].min(axis=1)).all()
+    assert (prices.frame['High'] >= prices.frame[['Open', 'Close']].max(axis=1)).all()
 
 
 def test_real_collection_output_compatible_with_stock_analysis():

@@ -79,6 +79,14 @@ def fetch_historical_prices(
                 (frame[["Open", "High", "Low", "Close"]] > 0).all(axis=1)
                 & (frame["Volume"] >= 0)
             ].reset_index(drop=True)
+            # A positive price alone is not enough: malformed provider rows can
+            # otherwise make impossible candles appear in the analysis.
+            valid_ohlc = (
+                (frame["Low"] <= frame[["Open", "Close"]].min(axis=1))
+                & (frame["High"] >= frame[["Open", "Close"]].max(axis=1))
+                & (frame["High"] >= frame["Low"])
+            )
+            frame = frame.loc[valid_ohlc].reset_index(drop=True)
             if len(frame) < 3 or not (frame["Date"].dt.date >= start_date).any():
                 raise StockDataError("요청한 분석 기간에 유효한 시세가 없습니다.")
             if not frame["Date"].is_monotonic_increasing:
