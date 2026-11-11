@@ -1,8 +1,7 @@
 import pandas as pd
 import pytest
-from pathlib import Path
 from stock_core import make_demo_data
-from news_collector import read_news_csv
+from tests._news_fixture import news_fixture
 from prediction_model import run_experiments
 from feature_engineering import prepare_feature_table, usable_history, PRICE_FEATURES
 from backtesting import chronological_test, walkforward_scores
@@ -10,8 +9,7 @@ from backtesting import chronological_test, walkforward_scores
 
 def test_three_model_group_synthetic():
     prices = make_demo_data()['가상기업 B']
-    all_news = read_news_csv((Path(__file__).parents[1]/'sample_data'/'가상뉴스_시연.csv').read_bytes(), synthetic=True)
-    news = all_news[all_news['stock_code'] == '가상기업 B']
+    news = news_fixture('가상기업 B')
     r = run_experiments(prices, news=news)
     assert list(r.summary['모델']) == ['가격·거래량','기술 지표 포함','기술 지표 + 뉴스']
     assert r.summary['표본수'].min() >= 20

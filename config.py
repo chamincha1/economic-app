@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parent
 DATA_CACHE = ROOT / 'data_cache'
 NEWS_CACHE = ROOT / 'news_cache'
 MODEL_DIR = ROOT / 'models'
-SAMPLE_DIR = ROOT / 'sample_data'
 TODAY = date.today()
 DEFAULT_START = TODAY - timedelta(days=365 * 3)
 DEFAULT_END = TODAY
@@ -37,4 +36,4 @@ def get_secret(key: str) -> str:
 
 def secret_status() -> dict[str, bool]:
     return {k: bool(get_secret(k)) for k in
-            ('NAVER_CLIENT_ID', 'NAVER_CLIENT_SECRET', 'DART_API_KEY')}
+            ('NAVER_CLIENT_ID', 'NAVER_CLIENT_SECRET', 'DART_API_KEY', 'KIS_APP_KEY', 'KIS_APP_SECRET')}

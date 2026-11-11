@@ -75,7 +75,15 @@ def clean_data(raw: pd.DataFrame) -> pd.DataFrame:
             "필수 열이 없습니다. Date(날짜), Close(종가), Volume(거래량)이 필요합니다. "
             f"현재 열: {', '.join(map(str, df.columns))}"
         )
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    # KIS exports and some vendor CSVs use compact YYYYMMDD dates. Pandas
+    # otherwise interprets integer 20251111 as nanoseconds since 1970.
+    date_text = df["Date"].astype("string").str.strip()
+    compact = date_text.str.fullmatch(r"\d{8}").fillna(False)
+    parsed = pd.to_datetime(date_text.where(~compact), errors="coerce", format="mixed")
+    if compact.any():
+        parsed.loc[compact] = pd.to_datetime(date_text.loc[compact],
+                                             format="%Y%m%d", errors="coerce")
+    df["Date"] = parsed
     for col in ("Close", "Volume", "Open", "High", "Low"):
         if col in df.columns:
             as_string = df[col].astype(str).str.replace(",", "", regex=False).str.strip()

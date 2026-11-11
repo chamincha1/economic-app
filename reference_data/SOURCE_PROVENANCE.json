@@ -1,0 +1,21 @@
+{
+  "files": {
+    "holidays-krx.csv": {
+      "archive": "FinanceDataReader-master(1).zip",
+      "path_in_archive": "FinanceDataReader-master/calendars/holidays-krx.csv",
+      "original_sha256": "986775c0ee123fbcd1b3e0cbc5540bfc731b663b5f1b796b0f66b5767e3c5d2d",
+      "records": 620,
+      "description": "KRX holiday calendar maintained by FinanceDataReader; a dated reference snapshot, not prices"
+    },
+    "kis_stock_api_reference.csv": {
+      "archive": "open-trading-api-main(1).zip",
+      "path_in_archive": "open-trading-api-main/MCP/KIS Code Assistant MCP/data.csv",
+      "original_sha256": "fa5fa22b95bbf4704f664713c83f8a42a1d0661ed2671881c8177390a9f2c5bb",
+      "original_catalog_records": 334,
+      "selected_records": 8,
+      "description": "Selected actual KIS API documentation records; not market quotations"
+    }
+  },
+  "price_ohlcv_file_count_in_archives": 0,
+  "quotation_data_included": false
+}

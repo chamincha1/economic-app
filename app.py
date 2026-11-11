@@ -1,7 +1,7 @@
 """MARKET PULSE · Educational domestic stock analytics, news and ML lab.
 
 Run with: python -m streamlit run app.py
-All displayed prices are historical EOD (or synthetic), NEVER live quotes.
+All displayed charts use verified online or explicitly unverified user-input historical data.
 The current predictor is an exploratory probability classifier, not advice.
 """
 from __future__ import annotations
@@ -15,13 +15,14 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from config import (STOCKS, INDICES, SAMPLE_DIR, TODAY, DEFAULT_START,
+from config import (STOCKS, INDICES, TODAY, DEFAULT_START,
                     DEFAULT_END, get_secret, secret_status)
-from stock_core import (StockDataError, make_demo_data, read_csv_bytes,
+from stock_core import (StockDataError, read_csv_bytes,
                         calculate_indicators, trim_period, common_date_align,
                         event_table, summarize)
 from market_data import (fetch_historical, list_domestic_stocks, price_snapshot,
                          MarketResult)
+from kis_market import KISReadOnlyClient, fetch_kis_historical, kis_credentials_ready, fetch_kis_trade_volume
 from technical_indicators import add_indicators
 from news_collector import (fetch_naver_news, read_news_csv, normalize_articles)
 from news_analyzer import analyze_articles
@@ -29,6 +30,7 @@ from disclosure_collector import fetch_disclosures
 from prediction_model import run_experiments
 from backtesting import walkforward_scores
 from model_explainer import describe_logistic_model
+from market_calendar import is_krx_holiday
 
 APP_TITLE = 'MARKET PULSE | 국내 주식 · 뉴스 · AI 데이터 분석'
 DARK = '#091120'
@@ -171,14 +173,13 @@ def prediction_reliability_chart(predictions: pd.DataFrame) -> go.Figure:
     return theme_plot(fig, 340)
 
 
-@st.cache_data(show_spinner=False)
-def demo_data() -> dict[str, pd.DataFrame]:
-    return make_demo_data()
-
-
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_online(code: str, start: date, end: date) -> MarketResult:
-    return fetch_historical(code, start, end, index=code in INDICES.values())
+def get_online(code: str, start: date, end: date, backend: str = 'fdr') -> MarketResult:
+    if code in INDICES.values() or backend == 'fdr':
+        return fetch_historical(code, start, end, index=code in INDICES.values())
+    if backend == 'kis':
+        return fetch_kis_historical(code, start, end)
+    raise StockDataError('인식할 수 없는 시세 데이터 제공처입니다.')
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -206,7 +207,7 @@ def with_provenance(frame: pd.DataFrame, metas: dict[str, dict],
 def source_caption(name: str, meta: dict) -> str:
     state = meta.get('status', '알 수 없음')
     state_text = {'fresh': '온라인 조회 성공', 'cached': '이전 캐시(최신 아님)',
-                  'demo': '가상 시연', 'uploaded': '사용자 업로드'}.get(state, state)
+                  'uploaded': '사용자 업로드', 'imported': '직접 등록(진위 미확인)'}.get(state, state)
     return (f"{name} · {state_text} · 제공처: {meta.get('source', '미상')} · "
             f"마지막 거래일: {meta.get('last_trade_date', '미상')} · "
             f"수집 시각: {meta.get('retrieved_at', '확인 불가')}")
@@ -215,7 +216,7 @@ def source_caption(name: str, meta: dict) -> str:
 # ---------------------------- Controls -----------------------------------
 with st.sidebar:
     st.header('⚙️ 데이터 및 분석 설정')
-    mode = st.radio('데이터 출처', ['국내 주식 실데이터', '가상 데이터(오프라인)', 'CSV 직접 업로드'],
+    mode = st.radio('데이터 출처', ['국내 주식 실데이터', 'CSV 직접 업로드'],
                     help='실데이터는 인터넷이 필요하며 모두 과거 일별 데이터입니다.')
     start = st.date_input('분석 시작일', value=DEFAULT_START, format='YYYY-MM-DD')
     end = st.date_input('분석 종료일', value=DEFAULT_END, format='YYYY-MM-DD')
@@ -225,7 +226,13 @@ with st.sidebar:
     st.divider()
     selection: dict[str, str] = {}
     uploads = []
+    backend = 'fdr'
     if mode == '국내 주식 실데이터':
+        backend = st.radio('과거 일별 시세 제공처', ['fdr', 'kis'],
+            format_func=lambda s: 'FinanceDataReader (NAVER → KRX)' if s == 'fdr' else 'KIS Open API (조회 전용)',
+            help='KIS는 본인 명의의 적법한 앱키가 설정되어 있어야 하며 데이터를 다른 캐시 폴더에 저장합니다.')
+        if backend == 'kis' and not kis_credentials_ready():
+            st.warning('KIS 인증키가 설정되어 있지 않습니다. KIS를 이용할 수 없다면 FinanceDataReader를 선택하세요.')
         chosen = st.multiselect('기본 분석 기업', list(STOCKS), default=['삼성전자'], max_selections=6)
         selection.update({name: STOCKS[name] for name in chosen})
         typed_code = st.text_input('추가 종목코드(6자리)', placeholder='예: 005930')
@@ -258,20 +265,18 @@ with st.sidebar:
         if st.button('↻ 가격 캐시 조회 재시도', use_container_width=True):
             get_online.clear()
             st.rerun()
-    elif mode == '가상 데이터(오프라인)':
-        chosen = st.multiselect('가상기업 선택', list(demo_data()), default=list(demo_data())[:2])
-        selection = {name: name for name in chosen}
-        st.warning('모든 가격·뉴스·예측값은 합성 예시 데이터입니다.')
     else:
         uploads = st.file_uploader('주식 CSV 파일(다중 선택)', type='csv', accept_multiple_files=True)
         st.caption('Date, Close, Volume 필수. Open/High/Low 선택. UTF-8/CP949 가능.')
     st.divider()
     st.caption('실제 시세 수집과 뉴스 API 연결에는 인터넷이 필요합니다.')
-    st.caption('오프라인 시연은 가상 데이터 모드를 선택하세요.')
+    st.caption('인터넷이 없으면 실제 출처를 확인한 CSV를 직접 업로드하세요.')
 
 if start > end:
     st.error('분석 시작일이 종료일보다 늦습니다.')
     st.stop()
+if is_krx_holiday(end):
+    st.caption('참고: 종료일은 제공된 FinanceDataReader KRX 휴장일 참고 목록에 있습니다. 휴장일 목록은 갱신이 필요할 수 있으며 실제 거래일 확인은 시세 데이터 기준입니다.')
 
 raw_data: dict[str, pd.DataFrame] = {}
 source_meta: dict[str, dict] = {}
@@ -281,7 +286,7 @@ if mode == '국내 주식 실데이터':
     for name, code in selection.items():
         try:
             with st.spinner(f'{name} 일별 가격을 확인합니다...'):
-                result = get_online(code, start, end)
+                result = get_online(code, start, end, backend)
             raw_data[name] = result.frame
             source_meta[name] = result.meta
             if result.is_cached:
@@ -289,14 +294,6 @@ if mode == '국내 주식 실데이터':
                            f"마지막 거래일 {result.meta.get('last_trade_date', '미상')}")
         except Exception as exc:
             load_errors.append(f'{name}: {exc}')
-elif_mode = mode == '가상 데이터(오프라인)'
-if elif_mode:
-    for name in selection:
-        df = demo_data()[name]
-        raw_data[name] = df
-        source_meta[name] = {'status': 'demo', 'source': '난수 기반 교육용 가상 OHLCV',
-                             'last_trade_date': df['Date'].max().date().isoformat(),
-                             'retrieved_at': '해당 없음'}
 if mode == 'CSV 직접 업로드':
     for upload in uploads or []:
         name = Path(upload.name).stem
@@ -317,7 +314,7 @@ if mode == 'CSV 직접 업로드':
 for msg in load_errors:
     st.error(msg)
 if not raw_data:
-    st.info('← 왼쪽에서 기업을 선택하거나 CSV를 업로드하세요. 인터넷이 없으면 가상 데이터 모드를 이용하세요.')
+    st.info('← 왼쪽에서 기업을 선택하거나 출처가 확인된 CSV를 업로드하세요. API가 실패하면 실제 데이터를 만들어 대체하지 않습니다.')
     st.stop()
 
 results: dict[str, pd.DataFrame] = {}
@@ -401,6 +398,41 @@ with p_detail:
     d.metric('약 52주 최저', f"{snapshot['low_52w']:,.0f}원")
     st.caption(f"기준 거래일 {snapshot['last_trade_date']} · 실제 거래대금 미수집 · "
                f"종가×거래량 **추정치** {snapshot['approx_turnover']:,.0f}원 (실제 거래대금 아님)")
+    if mode == '국내 주식 실데이터' and selected_code:
+        st.markdown('#### KIS REST 현재가 조회 (선택 기능)')
+        st.caption('KIS REST 응답은 버튼을 누른 순간 수신한 조회 결과입니다. 실시간 WebSocket 시세가 아닙니다.')
+        if kis_credentials_ready():
+            if st.button('KIS 조회 시점 가격 확인', key=f'kis_quote_button_{selected_code}'):
+                try:
+                    with st.spinner('KIS 현재가(REST) 확인...'):
+                        quote = KISReadOnlyClient(environment=get_secret('KIS_ENV') or 'prod').quote(selected_code)
+                    st.session_state['kis_quote'] = quote
+                except Exception as exc:
+                    st.warning(f'KIS 현재가 조회 실패: {type(exc).__name__}: {str(exc)[:130]}')
+            quote = st.session_state.get('kis_quote')
+            if isinstance(quote, dict) and quote.get('symbol') == selected_code:
+                st.write(f"조회 가격: {quote.get('price')}원 · 거래량: {quote.get('volume')}주 · "
+                         f"조회 시각: {quote.get('retrieved_at')} · "
+                         f"거래대금(API 제공): {quote.get('turnover')}")
+                st.caption(quote.get('warning',''))
+        else:
+            st.caption('KIS 키가 없어 REST 현재가 조회를 사용할 수 없습니다. 과거 일별 차트는 계속 사용할 수 있습니다.')
+    if selected_code and kis_credentials_ready():
+        with st.expander('KIS 실제 일별 매수·매도 체결량(별도 조회)', expanded=False):
+            st.caption('공식 KIS 종목별일별매수매도체결량 API를 호출합니다. OHLCV Volume과 별개 지표입니다. 주문 기능은 없습니다.')
+            if st.button('일별 매수·매도 체결량 조회', key=f'kis_buy_sell_{selected_code}'):
+                try:
+                    with st.spinner('KIS 매수·매도 체결량 조회 중...'):
+                        trade_result = fetch_kis_trade_volume(selected_code, start, end)
+                    st.session_state['kis_trade_volume_result'] = trade_result
+                    st.success(f'실제 제공처 기록 {len(trade_result.frame)}거래일 확인')
+                except Exception as exc:
+                    st.error(f'KIS 매수·매도 체결량 조회 실패: {type(exc).__name__}: {str(exc)[:110]}')
+            trade_result = st.session_state.get('kis_trade_volume_result')
+            if trade_result is not None and trade_result.meta.get('symbol') == selected_code:
+                st.caption(f"데이터 제공처: {trade_result.meta.get('source')} · 상태: {trade_result.meta.get('status')} · 마지막 거래일: {trade_result.meta.get('last_trade_date')}")
+                st.dataframe(trade_result.frame.tail(30), hide_index=True, use_container_width=True)
+                st.download_button('매수·매도 체결량 CSV 저장', csv_bytes(trade_result.frame), file_name=f'{selected_code}_buy_sell_executed_volume.csv', mime='text/csv')
     st.plotly_chart(candlestick_chart(selected_raw, selected_frame, selected_name), use_container_width=True)
     st.plotly_chart(volatility_chart(selected_frame), use_container_width=True)
     extra = add_indicators(selected_raw)
@@ -410,8 +442,7 @@ with p_detail:
               for key in ('RSI_14','MACD','MACD_signal','ATR_14','Volatility_20d',
                           'Return_5d','Return_20d','Volume_Ratio')}
     st.dataframe(pd.DataFrame([extras]), use_container_width=True, hide_index=True)
-    if meta['status'] != 'demo':
-        st.caption('단순 지표는 기업행동·가격 조정 여부·개별 거래정지 영향을 별도로 확인해야 합니다.')
+    st.caption('기술적 지표는 기업행동·가격 조정 여부·개별 거래정지 영향을 별도로 확인해야 합니다.')
     st.download_button('기술적 지표 CSV 저장', csv_bytes(with_provenance(extra, source_meta, selected_name)),
                        file_name='market_pulse_indicators.csv', mime='text/csv')
     st.download_button('기존 급변 분석 CSV 저장', csv_bytes(with_provenance(selected_frame, source_meta, selected_name)),
@@ -428,52 +459,40 @@ with p_anomaly:
     st.caption('가격 급변 Z점수는 직전 N일 수익률과 당일 수익률을 비교합니다. ' 
                '이상 사건의 원인이나 미래 가격을 자동 판정하지 않습니다.')
 
-# News upload data is intentionally stored separately per actual ticker or demo company.
+# News metadata uses actual API responses or user-submitted files; no synthetic stories.
 news_key = f'{mode}|{selected_code or selected_name}'
 if 'news_by_symbol' not in st.session_state:
     st.session_state['news_by_symbol'] = {}
-if elif_mode and news_key not in st.session_state['news_by_symbol']:
-    demo_news_file = SAMPLE_DIR / '가상뉴스_시연.csv'
-    if demo_news_file.exists():
-        try:
-            data = read_news_csv(demo_news_file.read_bytes(), synthetic=True)
-            st.session_state['news_by_symbol'][news_key] = data[
-                data['stock_code'] == selected_name].reset_index(drop=True)
-        except Exception:
-            pass
 with p_news:
     st.subheader(f'{selected_name} · 금융 뉴스/기업 공시')
     st.info('NEWS: 네이버 API는 **검색 결과 제목·요약·링크**만 수집합니다. 기사 본문 크롤링이나 자동 거래는 하지 않습니다.')
-    if elif_mode:
-        st.warning('현재 뉴스 목록은 컴퓨터가 생성한 **완전한 가상 시연 기사**입니다.')
-    else:
-        status = secret_status()
-        st.caption('API 준비 상태: NAVER 뉴스 ' + ('연결 설정 있음' if status['NAVER_CLIENT_ID'] and status['NAVER_CLIENT_SECRET'] else '키 미설정') +
-                   ' · OpenDART ' + ('연결 설정 있음' if status['DART_API_KEY'] else '키 미설정'))
-        if st.button('네이버 금융 뉴스 가져오기', disabled=not (status['NAVER_CLIENT_ID'] and status['NAVER_CLIENT_SECRET'])):
-            try:
-                with st.spinner('뉴스 검색 메타데이터를 확인합니다...'):
-                    news_result = fetch_naver_news(selected_name, selected_code)
-                st.session_state['news_by_symbol'][news_key] = news_result
-                st.success(f'뉴스 검색 결과 {len(news_result)}건 수집')
-            except Exception as exc:
-                st.error(f'뉴스 검색 실패: {type(exc).__name__}: {str(exc)[:140]}')
-        if selected_code and st.button('OpenDART 공시 가져오기', disabled=not status['DART_API_KEY']):
-            try:
-                with st.spinner('DART 종목코드 매핑 및 공시 검색...'):
-                    filings = fetch_disclosures(selected_code, (end-timedelta(days=100)).isoformat(), end.isoformat())
-                old = st.session_state['news_by_symbol'].get(news_key, pd.DataFrame())
-                st.session_state['news_by_symbol'][news_key] = normalize_articles(pd.concat([old, filings], ignore_index=True))
-                st.success(f'공시 {len(filings)}건 확인')
-            except Exception as exc:
-                st.error(f'공시 조회 실패: {type(exc).__name__}: {str(exc)[:140]}')
-        upload_news = st.file_uploader('별도 뉴스 메타데이터 CSV 불러오기', type='csv', key='news_upload')
-        if upload_news and st.button('업로드 뉴스 적용'):
-            try:
-                st.session_state['news_by_symbol'][news_key] = read_news_csv(upload_news.getvalue())
-                st.success('뉴스 CSV 저장 완료')
-            except Exception as exc:
-                st.error(f'뉴스 CSV 형식 오류: {exc}')
+    status = secret_status()
+    st.caption('API 준비 상태: NAVER 뉴스 ' + ('연결 설정 있음' if status['NAVER_CLIENT_ID'] and status['NAVER_CLIENT_SECRET'] else '키 미설정') +
+               ' · OpenDART ' + ('연결 설정 있음' if status['DART_API_KEY'] else '키 미설정'))
+    if st.button('네이버 금융 뉴스 가져오기', disabled=not (status['NAVER_CLIENT_ID'] and status['NAVER_CLIENT_SECRET'])):
+        try:
+            with st.spinner('뉴스 검색 메타데이터를 확인합니다...'):
+                news_result = fetch_naver_news(selected_name, selected_code)
+            st.session_state['news_by_symbol'][news_key] = news_result
+            st.success(f'뉴스 검색 결과 {len(news_result)}건 수집')
+        except Exception as exc:
+            st.error(f'뉴스 검색 실패: {type(exc).__name__}: {str(exc)[:140]}')
+    if selected_code and st.button('OpenDART 공시 가져오기', disabled=not status['DART_API_KEY']):
+        try:
+            with st.spinner('DART 종목코드 매핑 및 공시 검색...'):
+                filings = fetch_disclosures(selected_code, (end-timedelta(days=100)).isoformat(), end.isoformat())
+            old = st.session_state['news_by_symbol'].get(news_key, pd.DataFrame())
+            st.session_state['news_by_symbol'][news_key] = normalize_articles(pd.concat([old, filings], ignore_index=True))
+            st.success(f'공시 {len(filings)}건 확인')
+        except Exception as exc:
+            st.error(f'공시 조회 실패: {type(exc).__name__}: {str(exc)[:140]}')
+    upload_news = st.file_uploader('별도 뉴스 메타데이터 CSV 불러오기', type='csv', key='news_upload')
+    if upload_news and st.button('업로드 뉴스 적용'):
+        try:
+            st.session_state['news_by_symbol'][news_key] = read_news_csv(upload_news.getvalue())
+            st.success('뉴스 CSV 저장 완료')
+        except Exception as exc:
+            st.error(f'뉴스 CSV 형식 오류: {exc}')
     current_news = st.session_state['news_by_symbol'].get(news_key, pd.DataFrame())
     if current_news is not None and not current_news.empty:
         current_news = analyze_articles(current_news)
@@ -501,7 +520,7 @@ prediction_identity = (news_key, meta.get('last_trade_date'), len(selected_raw),
 with p_ai:
     st.subheader('다음 거래일 종가 상승 확률 · 탐색적 모델')
     st.info('로지스틱 회귀 모델을 시계열 방식으로 검증합니다. 확률은 **미보정 추정치**이며 미래 결과를 보장하지 않습니다.')
-    if meta['status'] == 'cached':
+    if meta.get('status') == 'cached':
         st.warning('오래된 캐시의 마지막 거래일을 기준으로 한 예측입니다. 오늘의 예측으로 해석하지 마세요.')
     current_news = st.session_state['news_by_symbol'].get(news_key, pd.DataFrame())
     st.caption('모델 A: 가격·거래량 | 모델 B: +기술적 지표 | 모델 C: +뉴스(충분한 시점 기록이 있을 때만)')
@@ -603,15 +622,15 @@ with p_data:
 
 표준편차나 이전 거래량이 0인 경우 기존 급변 탐지 엔진은 별도 예외 처리 규칙을 사용합니다.
 ''')
-    with st.expander('실제 데이터·가상 데이터·시세의 한계', expanded=True):
+    with st.expander('실제 데이터·시세의 한계', expanded=True):
         st.markdown('''
-- FinanceDataReader의 날짜별 OHLCV는 **실시간 체결가·호가·현재 매수·매도 잔량**이 아닙니다.
+- FinanceDataReader 및 KIS 기간별 OHLCV는 **실시간 체결가·호가·현재 매수·매도 잔량**이 아닙니다. KIS REST 현재가도 스트리밍 시세가 아닙니다.
 - 저장 캐시를 사용했다면 마지막 거래일과 수집 시각을 확인하세요.
 - 거래량은 체결된 주식 수이지 기업 매출액이나 매도 주문량이 아닙니다.
 - 액면분할, 배당, 권리락 등 기업행동은 원시 가격 변화의 해석을 왜곡할 수 있습니다.
 - 뉴스 감성은 문장 규칙의 결과이며 뉴스 인과관계나 실제 가격 예측 확률이 아닙니다.
 - AI 모델은 탐색적 확률 분류기이며 미래 주가·수익을 보장하지 않습니다.
-- 가상 데이터는 시장 데이터가 아닌 컴퓨터가 생성한 시연값입니다.
+- 테스트에 사용된 모의 응답은 실제 시세가 아니며 사용자 화면의 시세로 제공하지 않습니다.
 ''')
     with st.expander('API 키 설정 및 실행 오류'):
         st.markdown('''

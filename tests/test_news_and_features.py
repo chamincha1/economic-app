@@ -1,4 +1,3 @@
-from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
@@ -8,6 +7,7 @@ from news_collector import normalize_articles, fetch_naver_news, read_news_csv
 from feature_engineering import (make_news_features, prepare_feature_table,
                                  PRICE_FEATURES, historical_news_coverage)
 from technical_indicators import add_indicators
+from tests._news_fixture import news_fixture
 
 
 def sample_articles():
@@ -96,9 +96,7 @@ def test_target_is_strictly_next_day():
 
 
 def test_demo_news_historical_coverage():
-    p = Path(__file__).parents[1]/'sample_data'/'가상뉴스_시연.csv'
-    df = read_news_csv(p.read_bytes(), synthetic=True)
-    a = df[df['stock_code'] == '가상기업 A']
+    a = news_fixture('가상기업 A')
     status = historical_news_coverage(a, pd.Timestamp('2026-11-06'))
     assert status['ok'] and status['synthetic']
 
