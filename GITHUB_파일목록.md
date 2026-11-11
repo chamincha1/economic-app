@@ -15,3 +15,6 @@
 노트북: `MARKET_PULSE_Colab.ipynb` (실제 가격 조회에 성공해야 분석).
 
 가상 데이터 파일, 가상 뉴스 파일, 가상 예측 CSV 파일은 **포함하지 않습니다**.
+
+
+추가 UI 파일: `market_ui.py`, `assets/company_icons/*.png`, `.streamlit/config.toml`, `tests/test_market_ui.py`, `GITHUB_UI_교체안내.md`, `UI_변경파일_목록.md`.
