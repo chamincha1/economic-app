@@ -1,22 +1,22 @@
 @echo off
+chcp 65001 >nul
 cd /d "%~dp0"
 where py >nul 2>nul
 if %errorlevel%==0 (
-    set "PYCMD=py -3"
+  set "PY_CMD=py -3"
 ) else (
-    set "PYCMD=python"
+  set "PY_CMD=python"
 )
 if not exist ".venv\Scripts\python.exe" (
-    %PYCMD% -m venv ".venv"
-    if errorlevel 1 goto err
+  %PY_CMD% -m venv ".venv"
+  if errorlevel 1 goto :error
 )
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
-if errorlevel 1 goto err
+if errorlevel 1 goto :error
 ".venv\Scripts\python.exe" -m streamlit run app.py
 exit /b 0
-:err
+:error
 echo.
-echo Python 3.10+ and internet connection for first setup are required.
-echo Try: python -m pip install -r requirements.txt
+echo Python 3.10+ required. Check installation, internet, and requirements.txt
 pause
 exit /b 1

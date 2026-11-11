@@ -1,127 +1,74 @@
 from datetime import date
 from pathlib import Path
 import json
-
+import numpy as np
 import pandas as pd
 import pytest
-
-from market_data import (
-    HistoricalPrices, fetch_historical_prices, save_historical_cache,
-    read_historical_cache, format_origin, fetch_krx_large_cap_universe,
-    fallback_large_cap_universe,
-)
-from stock_core import StockDataError, calculate_indicators, trim_period
+from market_data import fetch_historical, validate_symbol, price_snapshot, list_domestic_stocks
+from stock_core import StockDataError
 
 
-def mock_ohlcv():
-    days = pd.bdate_range('2024-12-02', periods=90)
-    return pd.DataFrame({
-        'Date': days,
-        'Open': [100.0] * len(days),
-        'High': [105.0] * len(days),
-        'Low': [95.0] * len(days),
-        'Close': [100.0] * len(days),
-        'Volume': [1000] * len(days),
-    })
+def fixture_ohlcv(n=80):
+    return pd.DataFrame({'Date': pd.bdate_range('2025-01-01', periods=n),
+                         'Open': np.arange(n)+99, 'High': np.arange(n)+102,
+                         'Low': np.arange(n)+97, 'Close': np.arange(n)+100,
+                         'Volume': [1000]*n})
 
 
-def test_real_provider_name_and_historical_dates():
-    calls = []
-
-    def reader(symbol, start, end):
-        calls.append((symbol, start, end))
-        return mock_ohlcv()
-
-    prices = fetch_historical_prices('005930', '2025-01-01', '2025-03-31', reader=reader)
-    assert prices.provider == 'NAVER'
-    assert calls[0][0] == 'NAVER:005930'
-    assert calls[0][1] < '2025-01-01'  # warm-up period
-    assert prices.frame['Date'].max().date() <= date(2025, 3, 31)
-
-
-def test_fallback_to_secondary_provider_without_fabrication():
+def test_naver_failure_then_krx_success(tmp_path):
     calls = []
     def reader(symbol, start, end):
         calls.append(symbol)
         if symbol.startswith('NAVER:'):
-            raise TimeoutError('blocked')
-        return mock_ohlcv()
+            raise ConnectionError('simulated provider failure')
+        return fixture_ohlcv()
+    result = fetch_historical('005930', date(2025,1,2),date(2025,6,1),
+                              cache_dir=tmp_path, reader=reader)
+    assert calls == ['NAVER:005930','KRX:005930']
+    assert result.meta['status'] == 'fresh'
+    assert result.meta['source'] == 'KRX:005930'
+    assert (tmp_path/'005930.csv').exists()
+    assert json.loads((tmp_path/'005930.meta.json').read_text(encoding='utf-8'))['realtime'] is False
 
-    result = fetch_historical_prices('000660', '2025-01-01', '2025-03-31', reader=reader)
-    assert result.provider == 'KRX'
-    assert calls == ['NAVER:000660', 'KRX:000660']
 
-
-def test_fails_without_real_data():
-    def reader(symbol, start, end):
+def test_cached_provenance_never_renamed_fresh(tmp_path):
+    fetch_historical('005930', date(2025,1,2),date(2025,6,1),
+        cache_dir=tmp_path, reader=lambda *_: fixture_ohlcv())
+    original = json.loads((tmp_path/'005930.meta.json').read_text(encoding='utf-8'))
+    def failed(*args):
         raise ConnectionError('offline')
-    with pytest.raises(StockDataError, match='수집 실패'):
-        fetch_historical_prices('005930', '2025-01-01', '2025-03-31', reader=reader)
+    saved = fetch_historical('005930', date(2025,1,2),date(2025,6,1),
+        cache_dir=tmp_path, reader=failed)
+    assert saved.is_cached
+    assert saved.meta['retrieved_at'] == original['retrieved_at']
+    assert len(saved.meta['attempt_errors']) == 2
+    assert json.loads((tmp_path/'005930.meta.json').read_text(encoding='utf-8'))['status'] == 'fresh'
 
 
-def test_cache_with_metadata_and_origin(tmp_path):
-    prices = HistoricalPrices(mock_ohlcv(), 'NAVER')
-    meta = save_historical_cache(tmp_path, '005930', prices)
-    assert meta['is_realtime'] is False
-    assert meta['source'] == 'FinanceDataReader:NAVER'
-    assert (tmp_path / '005930.csv').exists()
-    assert (tmp_path / '005930.meta.json').exists()
-    df, stored = read_historical_cache(tmp_path, '005930')
-    assert len(df) == len(prices.frame)
-    assert stored['last_date'] == meta['last_date']
-    assert 'NAVER' in format_origin(stored, cached=True)
-    assert '이전 저장 자료' in format_origin(stored, cached=True)
+def test_no_fabricated_real_data(tmp_path):
+    with pytest.raises(StockDataError, match='온라인 및 이전 캐시'):
+        fetch_historical('005930', date(2025,1,2),date(2025,6,1),
+            cache_dir=tmp_path, reader=lambda *_: (_ for _ in ()).throw(ConnectionError('offline')))
 
 
-def test_cache_old_version_uses_explicit_unknown_source(tmp_path):
-    mock_ohlcv().to_csv(tmp_path / '005930.csv', index=False)
-    _, meta = read_historical_cache(tmp_path, '005930')
-    assert meta['source'].startswith('출처 미기록')
-    assert meta['is_realtime'] is False
-
-
-def test_invalid_or_wrong_period_is_rejected():
+def test_symbol_validation():
+    assert validate_symbol('005930') == '005930'
     with pytest.raises(StockDataError):
-        fetch_historical_prices('GOOG', '2025-01-01', '2025-02-01', reader=lambda *a: mock_ohlcv())
-    with pytest.raises(StockDataError):
-        fetch_historical_prices('005930', '2025-03-01', '2025-02-01', reader=lambda *a: mock_ohlcv())
-    with pytest.raises(StockDataError, match='수집 실패'):
-        fetch_historical_prices('005930', '2026-01-01', '2026-03-01', reader=lambda *a: mock_ohlcv())
+        validate_symbol('../bad')
+    assert validate_symbol('KS11', index=True) == 'KS11'
 
 
-def test_discard_invalid_ohlc_rows():
-    frame = mock_ohlcv()
-    frame.loc[21, 'Open'] = 0
-    frame.loc[22, 'High'] = float('nan')
-    frame.loc[23, 'Low'] = 102  # impossible: low is above open/close
-    prices = fetch_historical_prices('005930', '2025-01-01', '2025-03-31', reader=lambda *a: frame)
-    assert len(prices.frame) == (frame['Date'].dt.date <= date(2025, 3, 31)).sum() - 3
-    assert (prices.frame['Open'] > 0).all()
-    assert (prices.frame['Low'] <= prices.frame[['Open', 'Close']].min(axis=1)).all()
-    assert (prices.frame['High'] >= prices.frame[['Open', 'Close']].max(axis=1)).all()
+def test_snapshot_and_listing():
+    out = price_snapshot(fixture_ohlcv())
+    assert out['volume'] == 1000
+    assert out['close'] == 179
+    assert out['approx_turnover'] == 179000
+    stocks = list_domestic_stocks(lambda _: pd.DataFrame({'Code':['5930'], 'Name':['삼성전자']}))
+    assert stocks['Code'].iloc[0] == '005930'
 
 
-def test_real_collection_output_compatible_with_stock_analysis():
-    prices = fetch_historical_prices('005930', '2025-01-01', '2025-03-31', reader=lambda *a: mock_ohlcv())
-    analyzed = calculate_indicators(prices.frame)
-    output = trim_period(analyzed, '2025-01-01', '2025-03-31')
-    assert len(output) > 10
-    assert output['Scorable'].any()
-
-
-def test_krx_universe_is_ranked_and_limited():
-    listing = pd.DataFrame({
-        'Code': ['005930', '000660', '000001', '035420'],
-        'Name': ['삼성전자', 'SK하이닉스', '제외종목', 'NAVER'],
-        'Market': ['KOSPI', 'KOSPI', 'KONEX', 'KOSPI'],
-        'Marcap': [100, 90, 999, 80],
-    })
-    result = fetch_krx_large_cap_universe(2, listing_reader=lambda _: listing)
-    assert result['종목'].tolist() == ['삼성전자', 'SK하이닉스']
-    assert result['순위'].tolist() == [1, 2]
-
-
-def test_fallback_universe_has_50_analysable_codes():
-    result = fallback_large_cap_universe()
-    assert len(result) == 50
-    assert result['종목코드'].str.fullmatch(r'\d{6}').all()
+def test_index_can_have_no_volume(tmp_path):
+    df = fixture_ohlcv().drop(columns=['Volume'])
+    value = fetch_historical('KS11', date(2025,1,2),date(2025,6,1),
+        cache_dir=tmp_path, reader=lambda *_: df, index=True)
+    assert value.frame['Volume'].eq(0).all()

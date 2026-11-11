@@ -1,522 +1,628 @@
-"""MARKET PULSE · 국내 주식시장 변동성 분석 & 급변 탐지 웹앱.
+"""MARKET PULSE · Educational domestic stock analytics, news and ML lab.
 
-Run: python -m streamlit run app.py
+Run with: python -m streamlit run app.py
+All displayed prices are historical EOD (or synthetic), NEVER live quotes.
+The current predictor is an exploratory probability classifier, not advice.
 """
 from __future__ import annotations
-
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
-
+from typing import Any
+import io
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from stock_core import (
-    KR_STOCKS, StockDataError, calculate_indicators,
-    common_date_align, event_table, make_demo_data,
-    read_csv_bytes, summarize, trim_period,
-)
-from market_data import (
-    fallback_large_cap_universe, fetch_historical_prices,
-    fetch_krx_large_cap_universe, format_origin,
-    read_historical_cache, save_historical_cache,
-)
+from config import (STOCKS, INDICES, SAMPLE_DIR, TODAY, DEFAULT_START,
+                    DEFAULT_END, get_secret, secret_status)
+from stock_core import (StockDataError, make_demo_data, read_csv_bytes,
+                        calculate_indicators, trim_period, common_date_align,
+                        event_table, summarize)
+from market_data import (fetch_historical, list_domestic_stocks, price_snapshot,
+                         MarketResult)
+from technical_indicators import add_indicators
+from news_collector import (fetch_naver_news, read_news_csv, normalize_articles)
+from news_analyzer import analyze_articles
+from disclosure_collector import fetch_disclosures
+from prediction_model import run_experiments
+from backtesting import walkforward_scores
+from model_explainer import describe_logistic_model
 
-APP_DIR = Path(__file__).resolve().parent
-CACHE_DIR = APP_DIR / "data_cache"
-C_BACKGROUND = "#0b1020"
-C_PANEL = "#111a2c"
-C_TEXT = "#e8edf6"
-C_MUTED = "#9aacc7"
-C_BLUE = "#67a5ff"
-C_AQUA = "#52e0c4"
-C_RED = "#ff687c"
-C_YELLOW = "#ffcf75"
+APP_TITLE = 'MARKET PULSE | 국내 주식 · 뉴스 · AI 데이터 분석'
+DARK = '#091120'
+PANEL = '#111d31'
+BLUE = '#75adff'
+CYAN = '#49d8c5'
+RED = '#ff7287'
+GOLD = '#ffd47b'
+TEXT = '#edf3ff'
 
-st.set_page_config(
-    page_title="MARKET PULSE | 국내 주식 변동성 분석",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.markdown("""
+st.set_page_config(page_title=APP_TITLE, page_icon='📊', layout='wide',
+                   initial_sidebar_state='expanded')
+st.markdown('''
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700;800&display=swap');
-:root { color-scheme: dark; }
-html, body, .stApp, [class*="css"] { font-family: 'Noto Sans KR', sans-serif; }
-.stApp { background: #0b1020; color: #e9eff9; }
-[data-testid="stSidebar"] { background: #111a2c; border-right: 1px solid #27334a; }
-[data-testid="stMetric"] { background: #121e33; border:1px solid #293750; border-radius:15px; padding: 16px 18px; }
-[data-testid="stMetricLabel"] { color: #a3b5d0; }
-[data-testid="stMetricValue"] { color: #f6f9ff; }
-[data-testid="stTabs"] button { font-weight: 600; }
-.block-container { padding-top: 2rem; max-width: 1450px; }
-.hero { padding:26px 30px; border: 1px solid #344666; border-radius: 21px;
- background: linear-gradient(115deg,#172f58 0%,#132339 50%,#18243b 100%); margin-bottom: 22px; }
-.eyebrow { color: #91c8ff; font-size: .78rem; font-weight: 700; letter-spacing: .12rem; }
-.hero-title { color: #ffffff; font-weight:800; letter-spacing: -.04rem; font-size: 2.0rem; margin:7px 0 8px; }
-.hero-subtitle { color:#bcd0e9; font-size:.95rem; }
-.mode-tag {display:inline-block; background:#263c5b; color:#b5d8fb; padding:5px 11px; border-radius:50px; font-size:.8rem; font-weight:650;margin-top:14px;}
-.smallhint { color: #91a5be; font-size: .82rem; }
-h1,h2,h3,p,li { letter-spacing:-.01rem; }
-div[data-testid="stExpander"] { background: #101c30; border: 1px solid #293750; }
+.stApp {background:#091120; color:#edf3ff;}
+[data-testid="stSidebar"] {background:#111d31; border-right:1px solid #283950;}
+[data-testid="stMetric"] {background:#142239;border:1px solid #28405e;border-radius:15px;padding:16px;}
+[data-testid="stTabs"] button {font-weight:650;}
+.block-container {max-width:1650px; padding-top:1.3rem;}
+.mp-hero {border-radius:19px;padding:25px 30px;margin-bottom:18px;
+  background:linear-gradient(115deg,#16375f,#142339 53%,#102b38);
+  border:1px solid #315277;}
+.mp-title {font-weight:850;font-size:2rem;letter-spacing:-.04em;color:#f7fbff;}
+.mp-sub {color:#b9cbe1;font-size:.95rem;margin-top:5px;}
+.mp-chip {display:inline-block;border-radius:25px;padding:4px 11px;background:#274567;
+  color:#c4e2ff;font-size:.76rem;margin-top:14px;}
+.stButton > button {border-radius:11px;}
 </style>
-""", unsafe_allow_html=True)
+''', unsafe_allow_html=True)
+st.markdown('''<div class="mp-hero"><div style="color:#8fd2ff;font-size:.78rem;letter-spacing:.1em;font-weight:750">KOREA STOCK MARKET · DATA INTELLIGENCE</div>
+<div class="mp-title">MARKET PULSE <span style="color:#7cb3ff">/</span> 금융 데이터 연구소</div>
+<div class="mp-sub">일별 시세 · 캔들/거래량 · 기술적 지표 · 이상 변동 · 금융 뉴스/공시 · 다음 거래일 확률 모델</div>
+<div class="mp-chip">교육용 분석 플랫폼 · 실시간 시세 / 매매 추천 / 예측 보장 없음</div></div>''',
+            unsafe_allow_html=True)
 
 
-def chart_base(fig: go.Figure, height: int = 390) -> go.Figure:
-    fig.update_layout(
-        template="plotly_dark", height=height,
-        paper_bgcolor=C_PANEL, plot_bgcolor=C_PANEL,
-        font=dict(family="Noto Sans KR, Arial, sans-serif", color=C_TEXT),
-        margin=dict(l=22, r=22, t=38, b=26),
-        hovermode="x unified",
-        legend=dict(orientation="h", y=1.10, x=0),
-    )
-    fig.update_xaxes(gridcolor="#243149", zerolinecolor="#243149")
-    fig.update_yaxes(gridcolor="#243149", zerolinecolor="#243149")
+def csv_bytes(df: pd.DataFrame) -> bytes:
+    result = df.copy()
+    for column in result.columns:
+        if pd.api.types.is_datetime64_any_dtype(result[column]):
+            result[column] = result[column].astype(str)
+    return result.to_csv(index=False).encode('utf-8-sig')
+
+
+def theme_plot(fig: go.Figure, height: int = 400) -> go.Figure:
+    fig.update_layout(template='plotly_dark', height=height, paper_bgcolor=PANEL,
+                      plot_bgcolor=PANEL, font=dict(color=TEXT, family='Arial'),
+                      margin=dict(l=24, r=24, b=28, t=50),
+                      hovermode='x unified',
+                      legend=dict(orientation='h', x=0, y=1.11))
+    fig.update_xaxes(gridcolor='#263850', showline=False)
+    fig.update_yaxes(gridcolor='#263850', zerolinecolor='#263850')
     return fig
 
 
+def candlestick_chart(raw: pd.DataFrame, analyzed: pd.DataFrame, name: str) -> go.Figure:
+    df = add_indicators(raw)
+    cutoff = pd.to_datetime(analyzed['Date']).min()
+    df = df[df['Date'] >= cutoff].copy()
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=.07,
+                        row_heights=[.59, .23, .18],
+                        subplot_titles=('가격 및 이동평균(원)', '거래량(주)', 'RSI(14)'))
+    if {'Open', 'High', 'Low'}.issubset(df.columns) and df[['Open','High','Low','Close']].notna().all().all():
+        fig.add_trace(go.Candlestick(x=df['Date'], open=df['Open'], high=df['High'],
+                      low=df['Low'], close=df['Close'], name='일별 캔들',
+                      increasing_line_color=RED, decreasing_line_color=BLUE), row=1, col=1)
+    else:
+        fig.add_trace(go.Scatter(x=df['Date'], y=df['Close'], mode='lines',
+                      line=dict(color=BLUE, width=2), name='종가'), row=1, col=1)
+    for key, color in [('SMA_5', GOLD), ('SMA_20', CYAN), ('SMA_60', '#a99aff')]:
+        if df[key].notna().any():
+            fig.add_trace(go.Scatter(x=df['Date'], y=df[key], name=key.replace('_', ' '),
+                                     line=dict(width=1.6, color=color)), row=1, col=1)
+    jumps = analyzed.loc[analyzed['PriceJump']]
+    if not jumps.empty:
+        fig.add_trace(go.Scatter(x=jumps['Date'], y=jumps['Close'], mode='markers',
+                                 name='기존 가격 급변', marker=dict(color='#ffdf92',
+                                 size=9, symbol='diamond')), row=1, col=1)
+    bar_colors = np.where(df['Close'] >= df['Close'].shift(1), '#f17587', '#77adf7')
+    fig.add_trace(go.Bar(x=df['Date'], y=df['Volume'], marker_color=bar_colors,
+                         name='거래량', showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df['Date'], y=df['Volume_SMA20'], name='평균 거래량(20)',
+                             line=dict(color=GOLD, width=1.5)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df['Date'], y=df['RSI_14'], name='RSI 14',
+                             line=dict(color=CYAN, width=1.7)), row=3, col=1)
+    fig.add_hline(y=70, row=3, col=1, line_dash='dot', line_color='#9daec7', opacity=.5)
+    fig.add_hline(y=30, row=3, col=1, line_dash='dot', line_color='#9daec7', opacity=.5)
+    fig.update_yaxes(title_text='원', row=1, col=1)
+    fig.update_yaxes(title_text='주', row=2, col=1)
+    fig.update_yaxes(title_text='RSI', range=[0,100], row=3, col=1)
+    fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
+    fig.update_layout(title=f'{name} · 과거 OHLCV / 변동 분석')
+    return theme_plot(fig, 740)
+
+
+def normalized_price_chart(results: dict[str, pd.DataFrame]) -> go.Figure:
+    fig = go.Figure()
+    colors = [BLUE, CYAN, GOLD, '#aa94ff', RED, '#9be1a4']
+    for i, (name, df) in enumerate(results.items()):
+        series = df['Close'] / df['Close'].iloc[0] * 100
+        fig.add_trace(go.Scatter(x=df['Date'], y=series, mode='lines', name=name,
+                                 line=dict(color=colors[i % len(colors)], width=2)))
+    fig.update_layout(title='시작일=100 · 종목별 가격 변화 비교', yaxis_title='지수화된 종가')
+    return theme_plot(fig, 405)
+
+
+def bar_comparison(summary: pd.DataFrame) -> go.Figure:
+    fig = go.Figure(go.Bar(x=summary['종목'], y=summary['평균 일일변동성(%)'],
+                           marker_color=([BLUE, CYAN, GOLD, '#9e9aff', RED, '#82ddad'] * (1 + len(summary)//6))[:len(summary)],
+                           text=summary['평균 일일변동성(%)'].round(2), textposition='outside'))
+    fig.update_layout(title='종목별 평균 20일 변동성', yaxis_title='수익률 표준편차 (%포인트)')
+    return theme_plot(fig, 405)
+
+
+def volatility_chart(df: pd.DataFrame) -> go.Figure:
+    fig = go.Figure(go.Scatter(x=df['Date'], y=df['Volatility'], mode='lines',
+                              fill='tozeroy', line=dict(color=CYAN, width=2),
+                              name='설정 기간 변동성'))
+    fig.update_layout(title='변동성 추이 · 연율화하지 않은 일일 수익률 표준편차',
+                      yaxis_title='%포인트')
+    return theme_plot(fig, 280)
+
+
+def prediction_reliability_chart(predictions: pd.DataFrame) -> go.Figure:
+    x = predictions.copy()
+    x['bin'] = pd.cut(x['ProbabilityUp'], bins=np.linspace(0, 1, 6),
+                      include_lowest=True)
+    grouped = x.groupby('bin', observed=False).agg(
+        predicted=('ProbabilityUp','mean'), actual=('ActualUp', 'mean'),
+        count=('ActualUp','size')).dropna().reset_index()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=[0,1], y=[0,1], line=dict(dash='dash', color='#8599b4'),
+                             name='완전 보정 기준'))
+    fig.add_trace(go.Scatter(x=grouped['predicted'], y=grouped['actual'], mode='markers+lines',
+                             marker=dict(color=CYAN, size=np.maximum(9, grouped['count']*0.6)),
+                             name='실제 비율'))
+    fig.update_layout(title='확률 보정 참고 그래프 (표본이 적으면 불안정)',
+                      xaxis_title='평균 추정 확률', yaxis_title='실제 상승 비율',
+                      xaxis=dict(range=[0,1]), yaxis=dict(range=[0,1]))
+    return theme_plot(fig, 340)
+
+
 @st.cache_data(show_spinner=False)
-def demo_cached() -> dict[str, pd.DataFrame]:
+def demo_data() -> dict[str, pd.DataFrame]:
     return make_demo_data()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def online_cached(code: str, start_iso: str, end_iso: str):
-    prices = fetch_historical_prices(code, date.fromisoformat(start_iso), date.fromisoformat(end_iso))
-    # Cache write occurs only on an actual fresh download (not each Streamlit rerender).
-    try:
-        metadata = save_historical_cache(CACHE_DIR, code, prices)
-    except OSError:
-        metadata = {
-            "source": f"FinanceDataReader:{prices.provider}",
-            "last_date": prices.frame["Date"].max().date().isoformat(),
-            "collected_at_utc": "저장 실패",
-        }
-    return prices, metadata
+def get_online(code: str, start: date, end: date) -> MarketResult:
+    return fetch_historical(code, start, end, index=code in INDICES.values())
 
 
-@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
-def market_universe_cached() -> tuple[pd.DataFrame, str]:
-    """Use the latest KRX ranking when possible, with a visible safe fallback."""
-    try:
-        return fetch_krx_large_cap_universe(50), "KRX 시가총액 상위 50개 · 최근 거래일 기준"
-    except StockDataError:
-        return fallback_large_cap_universe(50), "기본 대형주 50개 목록 · KRX 순위 조회 실패로 순위는 갱신되지 않음"
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_krx_listing() -> pd.DataFrame:
+    return list_domestic_stocks()
 
 
-def load_online(name: str, code: str, start: date, end: date) -> tuple[pd.DataFrame, str]:
-    try:
-        prices, metadata = online_cached(code, start.isoformat(), end.isoformat())
-        return prices.frame, format_origin(metadata, cached=False)
-    except Exception as exc:
-        try:
-            frame, metadata = read_historical_cache(CACHE_DIR, code)
-            return frame, format_origin(metadata, cached=True)
-        except (OSError, StockDataError, ValueError):
-            pass
-        raise StockDataError(
-            f"{name}: 온라인 수집 실패 ({type(exc).__name__}: {str(exc)[:220]}). "
-            "인터넷 연결 또는 제공처 상태를 확인하거나 CSV/가상 데이터 모드를 사용하세요."
-        ) from exc
+def with_provenance(frame: pd.DataFrame, metas: dict[str, dict],
+                    selected: str | None = None) -> pd.DataFrame:
+    """Include dataset provenance in every exported analysis/ML CSV."""
+    output = frame.copy()
+    if '종목' in output.columns:
+        names = output['종목'].astype(str)
+        output['데이터상태'] = names.map(lambda n: metas.get(n, {}).get('status', 'unknown'))
+        output['원출처'] = names.map(lambda n: metas.get(n, {}).get('source', 'unknown'))
+        output['마지막거래일'] = names.map(lambda n: metas.get(n, {}).get('last_trade_date', ''))
+    elif selected is not None:
+        meta = metas.get(selected, {})
+        output['데이터상태'] = meta.get('status', 'unknown')
+        output['원출처'] = meta.get('source', 'unknown')
+        output['마지막거래일'] = meta.get('last_trade_date', '')
+    return output
 
 
-def png_chart_note():
-    st.caption("변동성 = 20거래일 일일 수익률 표준편차(%포인트). 급변은 과거 대비 통계적 이례성이며 투자 판단·미래 수익률 예측이 아닙니다.")
+def source_caption(name: str, meta: dict) -> str:
+    state = meta.get('status', '알 수 없음')
+    state_text = {'fresh': '온라인 조회 성공', 'cached': '이전 캐시(최신 아님)',
+                  'demo': '가상 시연', 'uploaded': '사용자 업로드'}.get(state, state)
+    return (f"{name} · {state_text} · 제공처: {meta.get('source', '미상')} · "
+            f"마지막 거래일: {meta.get('last_trade_date', '미상')} · "
+            f"수집 시각: {meta.get('retrieved_at', '확인 불가')}")
 
 
-def plot_comparison(summary: pd.DataFrame):
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=summary["종목"], y=summary["평균 일일변동성(%)"],
-        marker_color=(["#6c9efd", "#69d8d0", "#9a90ff", "#ffcc76", "#e984aa", "#8edb87"] * (1 + len(summary) // 6))[:len(summary)],
-        name="평균 20일 변동성",
-        text=summary["평균 일일변동성(%)"].map(lambda x: f"{x:.2f}%"),
-        textposition="outside",
-        hovertemplate="%{x}<br>평균 20일 변동성: %{y:.3f}%<extra></extra>",
-    ))
-    fig.update_layout(yaxis_title="일일 수익률 표준편차 (%포인트)", xaxis_title="종목")
-    return chart_base(fig, height=410)
-
-
-def plot_price_and_vol(df: pd.DataFrame, name: str):
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.13, row_heights=[.66, .34])
-    fig.add_trace(go.Scatter(
-        x=df["Date"], y=df["Close"], mode="lines", name="종가",
-        line=dict(color=C_BLUE, width=2.2),
-        hovertemplate="%{x|%Y-%m-%d}<br>종가: %{y:,.0f}<extra></extra>"
-    ), row=1, col=1)
-    if "MA" in df.columns:
-        fig.add_trace(go.Scatter(
-            x=df["Date"], y=df["MA"], mode="lines", name="20일 이동평균",
-            line=dict(color=C_YELLOW, width=1.5, dash="dot")
-        ), row=1, col=1)
-    price_jumps = df[df["PriceJump"]]
-    if not price_jumps.empty:
-        fig.add_trace(go.Scatter(
-            x=price_jumps["Date"], y=price_jumps["Close"], mode="markers", name="가격 급변",
-            marker=dict(color=C_RED, size=10, symbol="diamond", line=dict(color="#ffffff", width=.7)),
-            customdata=price_jumps[["ReturnPct"]].to_numpy(),
-            hovertemplate="%{x|%Y-%m-%d}<br>종가: %{y:,.0f}<br>수익률: %{customdata[0]:.2f}%<extra>급변 탐지</extra>",
-        ), row=1, col=1)
-    fig.add_trace(go.Scatter(
-        x=df["Date"], y=df["Volatility"], mode="lines", name="20일 변동성",
-        fill="tozeroy", line=dict(color=C_AQUA, width=2),
-        fillcolor="rgba(82,224,196,.12)",
-        hovertemplate="%{x|%Y-%m-%d}<br>변동성: %{y:.3f}%<extra></extra>"
-    ), row=2, col=1)
-    fig.update_yaxes(title_text="종가", row=1, col=1)
-    fig.update_yaxes(title_text="변동성(%)", row=2, col=1)
-    fig.update_layout(title=f"{name} · 주가 & 급변 탐지")
-    return chart_base(fig, height=580)
-
-
-def plot_normalized(results: dict[str, pd.DataFrame]):
-    fig = go.Figure()
-    colors = [C_BLUE, C_AQUA, C_YELLOW, "#bd95ff", C_RED, "#96e48b"]
-    for i, (name, df) in enumerate(results.items()):
-        if df.empty or df["Close"].iloc[0] <= 0:
-            continue
-        indexed = df["Close"] / df["Close"].iloc[0] * 100
-        fig.add_trace(go.Scatter(x=df["Date"], y=indexed, name=name, mode="lines", line=dict(color=colors[i % len(colors)], width=2)))
-    fig.update_layout(yaxis_title="시작일 = 100", title="주가 변화 비교 (시작일 100 기준)")
-    return chart_base(fig, 385)
-
-
-def plot_drawdown(df: pd.DataFrame):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["Date"], y=df["DrawdownPct"], name="고점 대비 낙폭", fill="tozeroy",
-                             line=dict(color=C_RED, width=2), fillcolor="rgba(255,104,124,.17)"))
-    fig.update_layout(title="분석 기간의 최대 낙폭(MDD)", yaxis_title="고점 대비 변화율 (%)")
-    return chart_base(fig, 270)
-
-
-def plot_returns(df: pd.DataFrame, name: str):
-    fig = go.Figure(go.Bar(
-        x=df["Date"], y=df["ReturnPct"], name="일일 수익률",
-        marker_color=[C_AQUA if value >= 0 else C_RED for value in df["ReturnPct"].fillna(0)],
-        hovertemplate="%{x|%Y-%m-%d}<br>일일 수익률: %{y:.2f}%<extra></extra>",
-    ))
-    fig.update_layout(title=f"{name} · 일일 수익률", yaxis_title="수익률 (%)")
-    return chart_base(fig, 430)
-
-
-def plot_volume(df: pd.DataFrame, name: str):
-    colors = [C_RED if flag else C_BLUE for flag in df["VolumeJump"]]
-    fig = go.Figure(go.Bar(x=df["Date"], y=df["Volume"], name="거래량", marker_color=colors))
-    fig.update_layout(title=f"{name} · 거래량 (빨강: 급증 탐지)", yaxis_title="거래량")
-    return chart_base(fig, 430)
-
-
-def plot_sensitivity(raw: pd.DataFrame, start: date, end: date, window: int, q: float) -> go.Figure:
-    limits = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
-    counts = []
-    for limit in limits:
-        df = trim_period(calculate_indicators(raw, window, limit, q), start, end)
-        counts.append(int(df["PriceJump"].sum()))
-    fig = go.Figure(go.Bar(x=[str(z) for z in limits], y=counts, marker_color=C_BLUE,
-                           text=counts, textposition="outside"))
-    fig.update_layout(title="Z 기준값에 따른 가격 급변 탐지 횟수", xaxis_title="급변 기준값 (Z ≥)", yaxis_title="탐지 횟수 (회)")
-    return chart_base(fig, 310)
-
-
-def csv_data(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8-sig")
-
-
-# ---- Header and sidebar -------------------------------------------------
-
-st.markdown("""
-<div class="hero">
-  <div class="eyebrow">KOREA STOCK MARKET · DATA ANALYTICS</div>
-  <div class="hero-title">MARKET PULSE <span style="color:#6eafff">/</span> 주식시장 이상 변동 분석</div>
-  <div class="hero-subtitle">주가 수익률 · 통계적 변동성 · 거래량 변화 · 급변 탐지 · 기업 비교를 한 화면에서</div>
-  <div class="mode-tag">● 교육용 데이터 분석 시스템 · 투자 추천 기능 없음</div>
-</div>
-""", unsafe_allow_html=True)
-
+# ---------------------------- Controls -----------------------------------
 with st.sidebar:
-    st.markdown("### ⚙️ 분석 설정")
-    mode = st.radio("데이터 출처", ["국내 주식 실데이터", "예시 데이터 (인터넷 불필요)", "CSV 직접 업로드"],
-                    help="예시 데이터는 프로그램 시연용 가상 자료입니다. 실제 주식 가격이 아닙니다.")
+    st.header('⚙️ 데이터 및 분석 설정')
+    mode = st.radio('데이터 출처', ['국내 주식 실데이터', '가상 데이터(오프라인)', 'CSV 직접 업로드'],
+                    help='실데이터는 인터넷이 필요하며 모두 과거 일별 데이터입니다.')
+    start = st.date_input('분석 시작일', value=DEFAULT_START, format='YYYY-MM-DD')
+    end = st.date_input('분석 종료일', value=DEFAULT_END, format='YYYY-MM-DD')
+    win = st.slider('과거 비교 기간(거래일)', 10, 60, 20, 5)
+    z_limit = st.slider('가격 급변 Z 기준', 1.5, 4.0, 2.5, .5)
+    vol_limit = st.slider('거래량 급증 배율', 1.2, 3.0, 1.5, .1)
     st.divider()
-    period_choice = st.selectbox("빠른 분석 기간", ["직접 지정", "1개월", "3개월", "6개월", "1년", "3년"], index=5)
-    days_by_period = {"1개월": 31, "3개월": 92, "6개월": 184, "1년": 365, "3년": 365 * 3}
-    preset_start = date.today() - timedelta(days=days_by_period.get(period_choice, 365 * 3))
-    start_date = st.date_input("분석 시작일", value=preset_start, format="YYYY-MM-DD")
-    end_date = st.date_input("분석 종료일", value=date.today(), format="YYYY-MM-DD")
-    window = st.slider("비교 기간 (거래일)", min_value=10, max_value=60, value=20, step=5)
-    z_limit = st.slider("가격 급변 Z 기준", min_value=1.5, max_value=4.0, value=2.5, step=.5)
-    q_limit = st.slider("거래량 급증 배율", min_value=1.2, max_value=3.0, value=1.5, step=.1)
-    st.divider()
-    uploads = None
-    selected_codes: dict[str, str] = {}
-    market_info = ""
-    if mode == "국내 주식 실데이터":
-        universe, market_info = market_universe_cached()
-        market_filter = st.radio("시장", ["전체", "KOSPI", "KOSDAQ"], horizontal=True)
-        search_term = st.text_input("종목 검색", placeholder="회사명 또는 6자리 종목코드")
-        visible_universe = universe.copy()
-        if market_filter != "전체":
-            visible_universe = visible_universe[visible_universe["시장"] == market_filter]
-        if search_term.strip():
-            needle = search_term.strip().lower()
-            visible_universe = visible_universe[
-                visible_universe["종목"].astype(str).str.lower().str.contains(needle, na=False)
-                | visible_universe["종목코드"].astype(str).str.contains(needle, na=False)
-            ]
-        label_to_code = {
-            f"{int(row['순위']):02d}. {row['종목']} ({row['종목코드']}) · {row['시장']}": str(row["종목코드"])
-            for _, row in visible_universe.iterrows()
-        }
-        default_labels = [
-            label for label in label_to_code
-            if any(f" {code})" in label for code in KR_STOCKS.values())
-        ]
-        selected_labels = st.multiselect(
-            "분석 기업 (최대 50개)", list(label_to_code), default=default_labels,
-            max_selections=50,
-            help="상위 50개 목록에서 필요한 종목만 고르세요. 많은 종목을 고르면 최초 수집 시간이 길어집니다.",
-        )
-        selected_codes = {
-            label.split(". ", 1)[1].rsplit(" (", 1)[0]: label_to_code[label]
-            for label in selected_labels
-        }
-        names = list(selected_codes)
-        with st.expander("시가총액 상위 50개 목록", expanded=False):
-            listed = visible_universe.copy()
-            if "시가총액" in listed:
-                listed["시가총액"] = listed["시가총액"].map(
-                    lambda value: f"{value:,.0f}원" if pd.notna(value) else "순위 조회 필요"
-                )
-            st.dataframe(listed, use_container_width=True, hide_index=True)
-        st.caption(market_info)
-        st.caption("FinanceDataReader의 NAVER → KRX 경로로 과거 일별 시세를 가져옵니다. 장중 실시간 시세가 아닙니다. 제공처 장애 시 기존 저장 자료를 명시적으로 표시합니다.")
-        if st.button("🔄 온라인 데이터 캐시 새로고침", use_container_width=True):
-            online_cached.clear()
-            market_universe_cached.clear()
+    selection: dict[str, str] = {}
+    uploads = []
+    if mode == '국내 주식 실데이터':
+        chosen = st.multiselect('기본 분석 기업', list(STOCKS), default=['삼성전자'], max_selections=6)
+        selection.update({name: STOCKS[name] for name in chosen})
+        typed_code = st.text_input('추가 종목코드(6자리)', placeholder='예: 005930')
+        if typed_code:
+            if len(typed_code) == 6 and typed_code.isdigit():
+                if typed_code not in selection.values():
+                    selection[f'종목 {typed_code}'] = typed_code
+            else:
+                st.warning('6자리 숫자 종목코드를 입력하세요.')
+        if st.button('🔎 KRX 전체 종목 목록 검색', use_container_width=True):
+            try:
+                with st.spinner('KRX 종목 목록을 조회합니다...'):
+                    st.session_state['krx_listing'] = get_krx_listing()
+            except Exception as exc:
+                st.warning(f'상장 목록 조회 실패: {type(exc).__name__}')
+        if 'krx_listing' in st.session_state:
+            catalog = st.session_state['krx_listing']
+            q = st.text_input('기업명으로 검색', placeholder='회사명 또는 종목코드 일부')
+            if q:
+                matching = catalog[catalog['Name'].str.contains(q, regex=False, case=False, na=False) |
+                                   catalog['Code'].str.contains(q, regex=False, na=False)].head(60)
+                if not matching.empty:
+                    options = {f"{r.Name} ({r.Code})": (r.Name, r.Code) for r in matching.itertuples()}
+                    option = st.selectbox('검색 결과', list(options))
+                    if st.button('검색 종목 분석에 추가'):
+                        st.session_state['extra_stock'] = options[option]
+            if 'extra_stock' in st.session_state:
+                nm, co = st.session_state['extra_stock']
+                selection[nm] = co
+        if st.button('↻ 가격 캐시 조회 재시도', use_container_width=True):
+            get_online.clear()
             st.rerun()
-    elif mode == "예시 데이터 (인터넷 불필요)":
-        demo = demo_cached()
-        names = st.multiselect("분석 기업", list(demo), default=list(demo))
+    elif mode == '가상 데이터(오프라인)':
+        chosen = st.multiselect('가상기업 선택', list(demo_data()), default=list(demo_data())[:2])
+        selection = {name: name for name in chosen}
+        st.warning('모든 가격·뉴스·예측값은 합성 예시 데이터입니다.')
     else:
-        uploads = st.file_uploader("CSV 파일을 선택하세요", type="csv", accept_multiple_files=True,
-                                   help="각 CSV에 Date, Close, Volume 열이 있어야 합니다. 한국어 날짜, 종가, 거래량도 지원합니다.")
-        names = []
-        st.caption("각 파일을 하나의 종목으로 인식합니다. 파일명이 화면의 종목 이름이 됩니다.")
+        uploads = st.file_uploader('주식 CSV 파일(다중 선택)', type='csv', accept_multiple_files=True)
+        st.caption('Date, Close, Volume 필수. Open/High/Low 선택. UTF-8/CP949 가능.')
     st.divider()
-    st.caption("📐 급변 점수는 **당일 제외 직전 거래일** 자료로 계산합니다.")
-    st.caption("📉 최대 낙폭은 선택한 분석 기간의 종가 최고점 대비 하락폭입니다.")
+    st.caption('실제 시세 수집과 뉴스 API 연결에는 인터넷이 필요합니다.')
+    st.caption('오프라인 시연은 가상 데이터 모드를 선택하세요.')
 
-if start_date > end_date:
-    st.error("시작일이 종료일보다 늦습니다. 분석 기간을 다시 선택해 주세요.")
+if start > end:
+    st.error('분석 시작일이 종료일보다 늦습니다.')
     st.stop()
-
-# ---- Data collection and calculation ------------------------------------
 
 raw_data: dict[str, pd.DataFrame] = {}
-sources: dict[str, str] = {}
-errors: list[str] = []
-
-if mode == "예시 데이터 (인터넷 불필요)":
-    st.warning("🧪 **가상 데이터 시연 모드** — 표시되는 가격·변동성·탐지 날짜는 실제 기업의 측정값이 아닙니다.")
-    for name in names:
-        raw_data[name] = demo_cached()[name]
-        sources[name] = "교육용 가상 데이터"
-elif mode == "국내 주식 실데이터":
-    st.info("🌐 실제 국내 주식의 과거 일별 OHLCV를 수집합니다. 실시간 호가가 아니며 공급원·마지막 거래일·수집 시각을 구분해 표시합니다. 이전 캐시 자료는 최신 시세가 아닙니다.")
-    with st.spinner("국내 주식 시세를 확인하고 있습니다..."):
-        for name in names:
-            try:
-                raw_data[name], sources[name] = load_online(name, selected_codes[name], start_date, end_date)
-            except StockDataError as exc:
-                errors.append(str(exc))
-else:
-    st.info("📂 CSV 모드 — 첫 분석일 이전의 과거 자료도 30거래일 이상 포함하면 더 정확한 초기 비교가 가능합니다.")
-    for file in uploads or []:
-        stem = Path(file.name).stem
-        unique_name = stem
+source_meta: dict[str, dict] = {}
+load_errors: list[str] = []
+if mode == '국내 주식 실데이터':
+    st.info('🌐 인터넷으로 **과거 일별 시세**를 수집합니다. 실시간 체결가가 아닙니다.')
+    for name, code in selection.items():
+        try:
+            with st.spinner(f'{name} 일별 가격을 확인합니다...'):
+                result = get_online(code, start, end)
+            raw_data[name] = result.frame
+            source_meta[name] = result.meta
+            if result.is_cached:
+                st.warning(f"{name}: 온라인 수집 실패, 이전 저장 데이터를 사용합니다. "
+                           f"마지막 거래일 {result.meta.get('last_trade_date', '미상')}")
+        except Exception as exc:
+            load_errors.append(f'{name}: {exc}')
+elif_mode = mode == '가상 데이터(오프라인)'
+if elif_mode:
+    for name in selection:
+        df = demo_data()[name]
+        raw_data[name] = df
+        source_meta[name] = {'status': 'demo', 'source': '난수 기반 교육용 가상 OHLCV',
+                             'last_trade_date': df['Date'].max().date().isoformat(),
+                             'retrieved_at': '해당 없음'}
+if mode == 'CSV 직접 업로드':
+    for upload in uploads or []:
+        name = Path(upload.name).stem
         suffix = 2
-        while unique_name in raw_data:
-            unique_name = f"{stem} ({suffix})"
+        original = name
+        while name in raw_data:
+            name = f'{original} ({suffix})'
             suffix += 1
         try:
-            raw_data[unique_name] = read_csv_bytes(file.getvalue())
-            sources[unique_name] = "사용자 업로드 CSV"
-        except (StockDataError, ValueError, OSError) as exc:
-            errors.append(f"{file.name}: {exc}")
+            df = read_csv_bytes(upload.getvalue())
+            raw_data[name] = df
+            source_meta[name] = {'status': 'uploaded', 'source': upload.name,
+                                 'last_trade_date': df['Date'].max().date().isoformat(),
+                                 'retrieved_at': '업로드 시각 확인 불가'}
+        except Exception as exc:
+            load_errors.append(f'{upload.name}: {exc}')
 
-for msg in errors:
+for msg in load_errors:
     st.error(msg)
 if not raw_data:
-    st.info("👈 왼쪽에서 기업을 선택하거나 CSV 파일을 추가하면 분석이 시작됩니다.")
+    st.info('← 왼쪽에서 기업을 선택하거나 CSV를 업로드하세요. 인터넷이 없으면 가상 데이터 모드를 이용하세요.')
     st.stop()
 
-if mode == "국내 주식 실데이터":
-    with st.expander("🗂️ 실제 데이터 수집 현황 · 마지막 관측일 확인", expanded=True):
-        st.dataframe(pd.DataFrame([{
-            "기업": name,
-            "종목코드": selected_codes[name],
-            "첫 거래일": frame["Date"].min().date().isoformat(),
-            "마지막 거래일": frame["Date"].max().date().isoformat(),
-            "거래일 수": len(frame),
-            "출처 및 수집 시각": sources[name],
-        } for name, frame in raw_data.items()]), use_container_width=True, hide_index=True)
-
-results = {}
+results: dict[str, pd.DataFrame] = {}
 for name, raw in raw_data.items():
     try:
-        analyzed = calculate_indicators(raw, window=window, z_limit=z_limit, q_limit=q_limit)
-        results[name] = trim_period(analyzed, start_date, end_date)
+        analyzed = calculate_indicators(raw, window=win, z_limit=z_limit, q_limit=vol_limit)
+        results[name] = trim_period(analyzed, start, end)
     except (StockDataError, ValueError, TypeError) as exc:
-        st.warning(f"{name}: {exc}")
-
+        st.warning(f'{name}: 분석 불가 - {exc}')
 if not results:
-    st.error("분석할 수 있는 종목이 없습니다. 날짜 범위를 넓히거나 자료를 변경해 주세요.")
+    st.error('계산 가능한 데이터가 없습니다. 기간을 넓히거나 더 긴 CSV를 사용하세요.')
     st.stop()
-
 results, aligned = common_date_align(results)
 if not aligned:
-    st.warning("기업들의 공통 거래일이 10일 미만입니다. 종목별 개별 기간으로 계산되므로 비교 기간이 동일하지 않을 수 있습니다.")
-
+    st.warning('종목의 공통 거래일이 10일 미만이라 각기 다른 기간의 데이터를 비교합니다.')
 summary = summarize(results)
 events = event_table(results)
 if summary.empty:
-    st.error("유효한 분석 결과가 없습니다.")
+    st.warning('선택 기간에 점수를 평가할 수 있는 날짜가 없습니다.')
     st.stop()
 
-# ---- Overview metrics ---------------------------------------------------
+selected_name = st.selectbox('📌 상세 분석 종목', list(results))
+selected_raw = raw_data[selected_name]
+selected_frame = results[selected_name]
+meta = source_meta[selected_name]
+selected_code = selection.get(selected_name, '') if mode == '국내 주식 실데이터' else ''
+st.caption(source_caption(selected_name, meta))
+price_fingerprint = int(pd.util.hash_pandas_object(selected_raw[['Date', 'Close', 'Volume']], index=False).sum())
 
-cols = st.columns(4)
-cols[0].metric("분석 종목", f"{len(results)}개")
-cols[1].metric("가격 급변 탐지", f"{int(summary['가격급변(회)'].sum())}회")
-cols[2].metric("동반 급변 탐지", f"{int(summary['동반급변(회)'].sum())}회")
-cols[3].metric("평균 일일변동성", f"{summary['평균 일일변동성(%)'].mean():.2f}%")
-if aligned and len(results) >= 2:
-    st.caption("기업별 비교는 공통으로 관측된 거래일을 기준으로 정렬했습니다. 변동성의 20일 이동 계산에는 이전 거래일까지의 자료가 사용됩니다.")
+stat_a, stat_b, stat_c, stat_d = st.columns(4)
+stat_a.metric('분석 종목', f'{len(results)}개')
+stat_b.metric('가격 급변 탐지', f"{summary['가격급변(회)'].sum():.0f}회")
+stat_c.metric('거래량 급증 탐지', f"{summary['거래량급증(회)'].sum():.0f}회")
+stat_d.metric('평균 변동성', f"{summary['평균 일일변동성(%)'].mean():.2f}%p")
 
-panel_overview, panel_detail, panel_events, panel_check = st.tabs([
-    "📊 대시보드", "📈 종목 상세", "🚨 급변 탐지 내역", "🧪 검증 · 사용법"
-])
+p_over, p_detail, p_anomaly, p_news, p_ai, p_test, p_data = st.tabs([
+    '📊 대시보드', '📈 종목 상세', '🚨 급변 탐지', '📰 뉴스·공시',
+    '🤖 AI 예측', '🧪 백테스트', '⚙️ 데이터·설명'])
 
-with panel_overview:
-    a, b = st.columns([1.15, 1])
-    with a:
-        st.plotly_chart(plot_comparison(summary), use_container_width=True)
-    with b:
-        if len(results) >= 2:
-            st.plotly_chart(plot_normalized(results), use_container_width=True)
-        else:
-            st.plotly_chart(plot_drawdown(next(iter(results.values()))), use_container_width=True)
-    st.subheader("기업별 변동성 비교표")
-    if "favorite_stocks" not in st.session_state:
-        st.session_state.favorite_stocks = []
-    favourite_options = list(results)
-    st.session_state.favorite_stocks = st.multiselect(
-        "★ 관심 종목", favourite_options,
-        default=[name for name in st.session_state.favorite_stocks if name in favourite_options],
-        help="관심 종목은 이 브라우저를 닫기 전까지 유지됩니다.",
-    )
-    show_favourites = st.checkbox("관심 종목만 표에 표시", value=False)
-    sort_labels = {
-        "평균 변동성 높은 순": ("평균 일일변동성(%)", False),
-        "가격 급변 많은 순": ("가격급변(회)", False),
-        "거래량 급증 많은 순": ("거래량급증(회)", False),
-        "수익률 높은 순": ("기간수익률(%)", False),
-        "최대 낙폭 작은 순": ("최대낙폭 MDD(%)", False),
-    }
-    table_summary = summary.copy()
-    period_returns = {
-        name: round((frame["Close"].iloc[-1] / frame["Close"].iloc[0] - 1) * 100, 2)
-        for name, frame in results.items()
-    }
-    table_summary["기간수익률(%)"] = table_summary["종목"].map(period_returns)
-    sort_choice = st.selectbox("정렬", list(sort_labels))
-    sort_col, ascending = sort_labels[sort_choice]
-    table_summary = table_summary.sort_values(sort_col, ascending=ascending, na_position="last")
-    if show_favourites:
-        table_summary = table_summary[table_summary["종목"].isin(st.session_state.favorite_stocks)]
-    st.dataframe(table_summary, use_container_width=True, hide_index=True)
-    st.download_button("⬇️ 기업별 비교표 CSV 저장", csv_data(table_summary), file_name="market_pulse_summary.csv", mime="text/csv")
-    png_chart_note()
-
-with panel_detail:
-    chosen = st.selectbox("자세히 살펴볼 종목", list(results), key="selected_stock")
-    selected = results[chosen]
-    sel_row = summary[summary["종목"] == chosen].iloc[0]
-    st.caption(f"출처: {sources.get(chosen, '알 수 없음')} · 데이터 기간: {selected['Date'].min():%Y-%m-%d} ~ {selected['Date'].max():%Y-%m-%d}")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("평균 변동성", f"{sel_row['평균 일일변동성(%)']:.2f}%")
-    m2.metric("가격 급변", f"{int(sel_row['가격급변(회)'])}회")
-    m3.metric("거래량 급증", f"{int(sel_row['거래량급증(회)'])}회")
-    m4.metric("최대 낙폭", f"{sel_row['최대낙폭 MDD(%)']:.2f}%")
-    chart_kind = st.radio("상세 차트", ["주가 · 변동성", "일일 수익률", "거래량", "최대 낙폭"], horizontal=True)
-    if chart_kind == "주가 · 변동성":
-        st.plotly_chart(plot_price_and_vol(selected, chosen), use_container_width=True)
-    elif chart_kind == "일일 수익률":
-        st.plotly_chart(plot_returns(selected, chosen), use_container_width=True)
-    elif chart_kind == "거래량":
-        st.plotly_chart(plot_volume(selected, chosen), use_container_width=True)
+with p_over:
+    st.subheader('국내 종합 주식시장 분석')
+    if mode == '국내 주식 실데이터':
+        if st.button('KOSPI·KOSDAQ 과거 지수 가져오기'):
+            info = {}
+            for market, symbol in INDICES.items():
+                try:
+                    info[market] = get_online(symbol, start, end)
+                except Exception as exc:
+                    st.warning(f'{market}: 지수 조회 실패 ({type(exc).__name__})')
+            st.session_state['index_results'] = info
+            st.session_state['index_selection'] = (start, end)
+        if 'index_results' in st.session_state and st.session_state.get('index_selection') == (start, end):
+            info = st.session_state['index_results']
+            cols = st.columns(2)
+            for col, market in zip(cols, INDICES):
+                if market in info:
+                    index_raw = info[market].frame
+                    info_last = price_snapshot(index_raw)
+                    col.metric(f'{market} (일별 종가)', f"{info_last['close']:,.2f}",
+                               f"{info_last['change_pct']:+.2f}%")
+                    col.caption(f"{info[market].meta.get('last_trade_date','')} · {info[market].meta.get('status','')}")
     else:
-        st.plotly_chart(plot_drawdown(selected), use_container_width=True)
-    st.download_button("⬇️ 이 종목 분석 데이터 CSV 저장", csv_data(selected),
-                       file_name=f"market_pulse_{selected_codes.get(chosen, KR_STOCKS.get(chosen, 'custom'))}.csv", mime="text/csv")
-    png_chart_note()
+        st.caption('실제 KOSPI/KOSDAQ은 실데이터 모드에서만 조회합니다. 현재는 사용자 입력 또는 가상기업의 값입니다.')
+    left, right = st.columns([1.05, 1])
+    with left:
+        st.plotly_chart(bar_comparison(summary), use_container_width=True)
+    with right:
+        st.plotly_chart(normalized_price_chart(results), use_container_width=True)
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+    st.download_button('기업 비교표 CSV 저장', csv_bytes(with_provenance(summary, source_meta)),
+                       file_name='market_pulse_summary.csv', mime='text/csv')
+    st.caption('기업별 평균 변동성은 일일 수익률 표본표준편차이며, 수익률 또는 위험의 미래 예측값이 아닙니다.')
 
-with panel_events:
-    st.subheader("자동 탐지된 이례적 거래일")
-    st.caption("주가 급변과 거래량 급증을 별도로 탐지하며, 특정 경제 사건의 원인을 자동으로 판정하지 않습니다.")
-    types = ["전체", "가격·거래량 동반 급변", "가격 급변", "거래량 급증"]
-    selected_type = st.selectbox("분류 필터", types)
-    visible = events if selected_type == "전체" else events[events["탐지분류"] == selected_type]
-    st.write(f"**탐지 결과: {len(visible)}건**")
-    display = visible.copy()
-    for col in ["일일수익률(%)", "Z점수", "거래량배율"]:
-        display[col] = display[col].round(2)
-    st.dataframe(display, use_container_width=True, hide_index=True)
-    st.download_button("⬇️ 탐지 결과 CSV 저장", csv_data(visible), file_name="market_pulse_events.csv", mime="text/csv")
-    if visible.empty:
-        st.info("선택한 탐지 기준과 기간에서 해당하는 이벤트가 없습니다.")
-    st.info("참고: '과거표준편차0'인 행은 통상적인 Z점수를 계산할 수 없어 과거의 정체된 수익률에서 변화가 발생했다는 별도 규칙으로 탐지합니다.")
+with p_detail:
+    st.subheader(f'{selected_name} · 가격 및 보조지표')
+    snapshot = price_snapshot(selected_raw)
+    a,b,c,d = st.columns(4)
+    a.metric('마지막 일별 종가', f"{snapshot['close']:,.0f}원", f"{snapshot['change_pct']:+.2f}%")
+    b.metric('마지막 거래량', f"{snapshot['volume']:,}주")
+    c.metric('약 52주 최고', f"{snapshot['high_52w']:,.0f}원")
+    d.metric('약 52주 최저', f"{snapshot['low_52w']:,.0f}원")
+    st.caption(f"기준 거래일 {snapshot['last_trade_date']} · 실제 거래대금 미수집 · "
+               f"종가×거래량 **추정치** {snapshot['approx_turnover']:,.0f}원 (실제 거래대금 아님)")
+    st.plotly_chart(candlestick_chart(selected_raw, selected_frame, selected_name), use_container_width=True)
+    st.plotly_chart(volatility_chart(selected_frame), use_container_width=True)
+    extra = add_indicators(selected_raw)
+    current = extra.iloc[-1]
+    st.markdown('#### 주요 기술적 지표')
+    extras = {key: (round(float(current[key]),3) if pd.notna(current[key]) else None)
+              for key in ('RSI_14','MACD','MACD_signal','ATR_14','Volatility_20d',
+                          'Return_5d','Return_20d','Volume_Ratio')}
+    st.dataframe(pd.DataFrame([extras]), use_container_width=True, hide_index=True)
+    if meta['status'] != 'demo':
+        st.caption('단순 지표는 기업행동·가격 조정 여부·개별 거래정지 영향을 별도로 확인해야 합니다.')
+    st.download_button('기술적 지표 CSV 저장', csv_bytes(with_provenance(extra, source_meta, selected_name)),
+                       file_name='market_pulse_indicators.csv', mime='text/csv')
+    st.download_button('기존 급변 분석 CSV 저장', csv_bytes(with_provenance(selected_frame, source_meta, selected_name)),
+                       file_name='market_pulse_indicators_anomaly.csv', mime='text/csv')
 
-with panel_check:
-    st.subheader("탐지 기준을 바꾸면 결과가 얼마나 달라질까?")
-    check_name = st.selectbox("민감도 실험 대상", list(results), key="verify_stock")
-    st.plotly_chart(plot_sensitivity(raw_data[check_name], start_date, end_date, window, q_limit), use_container_width=True)
-    st.caption("이는 민감도 분석이지 정확도 평가가 아닙니다. 실제 사건 정답표가 없는 경우 탐지 횟수만으로 정확도를 판단할 수 없습니다.")
-    with st.expander("알고리즘 계산 원리", expanded=True):
-        st.markdown("""
-1. **일일 수익률:** `(오늘 종가 / 전일 종가 - 1) × 100`
-2. **20일 변동성:** 당일까지의 최근 20개 일일 수익률의 *표본 표준편차* (연율화하지 않음)
-3. **급변 점수(Z):** `|오늘 수익률 - 직전 20개 수익률 평균| / 직전 20개 수익률 표준편차`
-4. **거래량 배율:** `오늘 거래량 / 직전 20거래일의 평균 거래량`
-5. **최대 낙폭(MDD):** 선택한 기간의 각 날짜까지의 최고 종가 대비 현재 종가의 하락률 중 최솟값
+with p_anomaly:
+    st.subheader('직전 거래일 기준의 과거 급변 탐지')
+    kind = st.selectbox('탐지 유형', ['전체','가격·거래량 동반 급변','가격 급변','거래량 급증'])
+    visible = events if kind == '전체' else events[events['탐지분류'] == kind]
+    st.write(f'탐지 결과: **{len(visible)}건**')
+    st.dataframe(visible.round(3), use_container_width=True, hide_index=True)
+    st.download_button('급변 탐지 CSV 저장', csv_bytes(with_provenance(visible, source_meta)),
+                       file_name='market_pulse_anomalies.csv', mime='text/csv')
+    st.caption('가격 급변 Z점수는 직전 N일 수익률과 당일 수익률을 비교합니다. ' 
+               '이상 사건의 원인이나 미래 가격을 자동 판정하지 않습니다.')
 
-직전 20거래일의 계산에는 **오늘의 정보가 들어가지 않습니다**. 표준편차나 평균 거래량이 0이면 해당 비율은 계산할 수 없으며, 변화 유무를 별도로 표시합니다.
-""")
-    with st.expander("데이터 품질과 한계", expanded=True):
-        st.markdown("""
-- **가상 데이터**는 교육용 시연 자료이며 실제 가격·이벤트가 아닙니다. 실데이터 모드를 선택해야 실제 기업을 분석할 수 있습니다.
-- **실데이터**의 제공처 변경, 인터넷 문제 또는 이용 제한으로 수집이 실패할 수 있습니다. 이때 자동으로 가상 데이터를 실데이터로 둔갑시키지 않습니다.
-- **이전 저장 데이터** 사용 시 갱신 시점이 오래될 수 있으므로 분석 시점을 확인하세요.
-- **액면분할, 배당, 권리락, 거래정지** 등 기업행동 및 시장 구조 변화가 원시 종가에 영향을 줄 수 있습니다. 가격 급변이 곧 투자 위험·원인·예측을 의미하지 않습니다.
-- **CSV 파일**은 `Date,Close,Volume` 열을 포함해야 합니다. `날짜,종가,거래량`도 가능합니다. 시작일보다 최소 비교 기간 이상 앞선 데이터가 있으면 좋습니다.
-- 서로 다른 종목은 공통 거래일로 정렬해 비교하지만, 수정주가 적용 방식과 거래일 누락 등의 차이를 추가로 점검해야 합니다.
-""")
-    with st.expander("수행평가 테스트 체크리스트"):
-        for item in [
-            "정상적인 변화에서 과도한 급변이 감지되지 않는지 검토",
-            "급등·급락 가상 데이터에서 가격 급변 탐지 확인",
-            "가격은 유지되지만 거래량만 급증한 가상 데이터 확인",
-            "중복 날짜, 결측값, 음수 종가 데이터 정리 확인",
-            "분석 기간 부족 및 인터넷 오류 시 안내 메시지 확인",
-            "기업별 결과와 CSV 출력 데이터 일치 확인",
-        ]:
-            st.checkbox(item, key=f"test_{item}")
+# News upload data is intentionally stored separately per actual ticker or demo company.
+news_key = f'{mode}|{selected_code or selected_name}'
+if 'news_by_symbol' not in st.session_state:
+    st.session_state['news_by_symbol'] = {}
+if elif_mode and news_key not in st.session_state['news_by_symbol']:
+    demo_news_file = SAMPLE_DIR / '가상뉴스_시연.csv'
+    if demo_news_file.exists():
+        try:
+            data = read_news_csv(demo_news_file.read_bytes(), synthetic=True)
+            st.session_state['news_by_symbol'][news_key] = data[
+                data['stock_code'] == selected_name].reset_index(drop=True)
+        except Exception:
+            pass
+with p_news:
+    st.subheader(f'{selected_name} · 금융 뉴스/기업 공시')
+    st.info('NEWS: 네이버 API는 **검색 결과 제목·요약·링크**만 수집합니다. 기사 본문 크롤링이나 자동 거래는 하지 않습니다.')
+    if elif_mode:
+        st.warning('현재 뉴스 목록은 컴퓨터가 생성한 **완전한 가상 시연 기사**입니다.')
+    else:
+        status = secret_status()
+        st.caption('API 준비 상태: NAVER 뉴스 ' + ('연결 설정 있음' if status['NAVER_CLIENT_ID'] and status['NAVER_CLIENT_SECRET'] else '키 미설정') +
+                   ' · OpenDART ' + ('연결 설정 있음' if status['DART_API_KEY'] else '키 미설정'))
+        if st.button('네이버 금융 뉴스 가져오기', disabled=not (status['NAVER_CLIENT_ID'] and status['NAVER_CLIENT_SECRET'])):
+            try:
+                with st.spinner('뉴스 검색 메타데이터를 확인합니다...'):
+                    news_result = fetch_naver_news(selected_name, selected_code)
+                st.session_state['news_by_symbol'][news_key] = news_result
+                st.success(f'뉴스 검색 결과 {len(news_result)}건 수집')
+            except Exception as exc:
+                st.error(f'뉴스 검색 실패: {type(exc).__name__}: {str(exc)[:140]}')
+        if selected_code and st.button('OpenDART 공시 가져오기', disabled=not status['DART_API_KEY']):
+            try:
+                with st.spinner('DART 종목코드 매핑 및 공시 검색...'):
+                    filings = fetch_disclosures(selected_code, (end-timedelta(days=100)).isoformat(), end.isoformat())
+                old = st.session_state['news_by_symbol'].get(news_key, pd.DataFrame())
+                st.session_state['news_by_symbol'][news_key] = normalize_articles(pd.concat([old, filings], ignore_index=True))
+                st.success(f'공시 {len(filings)}건 확인')
+            except Exception as exc:
+                st.error(f'공시 조회 실패: {type(exc).__name__}: {str(exc)[:140]}')
+        upload_news = st.file_uploader('별도 뉴스 메타데이터 CSV 불러오기', type='csv', key='news_upload')
+        if upload_news and st.button('업로드 뉴스 적용'):
+            try:
+                st.session_state['news_by_symbol'][news_key] = read_news_csv(upload_news.getvalue())
+                st.success('뉴스 CSV 저장 완료')
+            except Exception as exc:
+                st.error(f'뉴스 CSV 형식 오류: {exc}')
+    current_news = st.session_state['news_by_symbol'].get(news_key, pd.DataFrame())
+    if current_news is not None and not current_news.empty:
+        current_news = analyze_articles(current_news)
+        st.caption('감성 분석은 금융 특화 학습 AI가 아닌 설명 가능한 **키워드 휴리스틱**입니다. ' 
+                   '개별 기사 감성이 주가의 상승 확률을 뜻하지 않습니다.')
+        selected_topic = st.selectbox('기사 분류 필터', ['전체'] + sorted(current_news['topic'].unique().tolist()))
+        shown = current_news if selected_topic == '전체' else current_news[current_news['topic'] == selected_topic]
+        columns = ['published_at','title','publisher','topic','sentiment_label',
+                   'sentiment_score','evidence','first_seen_at','source_url']
+        st.dataframe(shown[columns].astype({'title': str}), use_container_width=True, hide_index=True)
+        st.download_button('뉴스 분석 CSV 저장', csv_bytes(current_news),
+                           file_name='market_pulse_news.csv', mime='text/csv')
+        st.caption('과거 기사라도 최초 확인 시간이 오늘이라면 과거 예측에 소급해서 사용할 수 없습니다.')
+    else:
+        st.info('사용할 뉴스가 없습니다. API 키를 설정하거나 CSV를 업로드해 주세요.')
+
+# Recompute the identity whenever inputs change, never reuse a previous model silently.
+active_news = st.session_state['news_by_symbol'].get(news_key, pd.DataFrame())
+news_fingerprint = (int(pd.util.hash_pandas_object(
+    active_news[['title', 'published_at', 'first_seen_at']].fillna('').astype(str), index=False).sum())
+    if active_news is not None and not active_news.empty else 0)
+prediction_identity = (news_key, meta.get('last_trade_date'), len(selected_raw), win,
+                       price_fingerprint, news_fingerprint)
+
+with p_ai:
+    st.subheader('다음 거래일 종가 상승 확률 · 탐색적 모델')
+    st.info('로지스틱 회귀 모델을 시계열 방식으로 검증합니다. 확률은 **미보정 추정치**이며 미래 결과를 보장하지 않습니다.')
+    if meta['status'] == 'cached':
+        st.warning('오래된 캐시의 마지막 거래일을 기준으로 한 예측입니다. 오늘의 예측으로 해석하지 마세요.')
+    current_news = st.session_state['news_by_symbol'].get(news_key, pd.DataFrame())
+    st.caption('모델 A: 가격·거래량 | 모델 B: +기술적 지표 | 모델 C: +뉴스(충분한 시점 기록이 있을 때만)')
+    if st.button('🤖 데이터 기준 AI 예측·평가 실행', type='primary'):
+        try:
+            with st.spinner('시간순 훈련·검증·시험 구간 계산...'):
+                evaluation = run_experiments(selected_raw, news=current_news)
+            st.session_state['prediction_result'] = evaluation
+            st.session_state['prediction_identity'] = prediction_identity
+        except Exception as exc:
+            st.session_state.pop('prediction_result', None)
+            st.error(f'AI 예측 계산 불가: {exc}')
+    identity = prediction_identity
+    if st.session_state.get('prediction_identity') == identity and 'prediction_result' in st.session_state:
+        p = st.session_state['prediction_result']
+        st.warning(p.news_note)
+        st.markdown('#### 다음 거래일 상승 추정 확률')
+        st.dataframe(p.forecasts.style.format({'상승 추정 확률':'{:.1%}', '평가 Brier':'{:.4f}'}),
+                     use_container_width=True, hide_index=True)
+        st.markdown('#### 시험 구간 성능(한 번만 사용한 마지막 구간)')
+        st.dataframe(p.summary.style.format({'정확도':'{:.1%}','정밀도':'{:.1%}',
+                   '재현율':'{:.1%}','F1':'{:.3f}','Brier':'{:.4f}',
+                   '기준 Brier':'{:.4f}'}), use_container_width=True, hide_index=True)
+        st.caption('Brier는 작을수록 좋습니다. 기준보다 Brier가 크면 검증 기간에서 기준 모델보다 못합니다.')
+        # Choose a fixed explanatory model; selecting by TEST Brier would leak test info.
+        best = '기술 지표 포함' if '기술 지표 포함' in p.evaluations else list(p.evaluations)[0]
+        try:
+            ev = p.evaluations[best]
+            from feature_engineering import usable_history
+            from backtesting import _predictor
+            tbl = usable_history(p.history, ev.feature_names)
+            fitted = _predictor().fit(tbl[ev.feature_names].replace([np.inf,-np.inf], np.nan), tbl['TargetUp'].astype(int))
+            factors = describe_logistic_model(fitted, ev.feature_names,
+                    p.history.tail(1).replace([np.inf,-np.inf], np.nan))
+            st.markdown('#### 모델 변수 기여도(로그오즈 방향, 인과관계 아님)')
+            st.dataframe(factors.head(8), use_container_width=True, hide_index=True)
+        except Exception:
+            st.caption('모델 변수 설명을 생성할 수 없습니다.')
+        st.download_button('AI 예측 CSV 저장', csv_bytes(with_provenance(p.forecasts, source_meta, selected_name)),
+                           file_name='market_pulse_predictions.csv', mime='text/csv')
+        st.download_button('모델 검증 CSV 저장', csv_bytes(with_provenance(p.summary, source_meta, selected_name)),
+                           file_name='market_pulse_model_scores.csv', mime='text/csv')
+    else:
+        st.caption('버튼을 눌러 계산합니다. 자료 부족·단일 클래스·뉴스 시점 정보 미확인 시 해당 모델은 생성되지 않습니다.')
+
+with p_test:
+    st.subheader('시계열 백테스트와 기준값 민감도')
+    st.caption('최종 20% 시계열 시험 구간, 학습·검증 경계 1행 간격, 예측 목표는 t+1 종가 상승 여부입니다.')
+    if st.session_state.get('prediction_identity') == prediction_identity and 'prediction_result' in st.session_state:
+        p = st.session_state['prediction_result']
+        label = st.selectbox('백테스트할 모델', list(p.evaluations))
+        ev = p.evaluations[label]
+        st.dataframe(ev.prediction_rows, use_container_width=True, hide_index=True)
+        st.plotly_chart(prediction_reliability_chart(ev.prediction_rows), use_container_width=True)
+        if st.button('Walk-forward(3회) 추가 검증'):
+            try:
+                from feature_engineering import usable_history
+                table = usable_history(p.history, ev.feature_names)
+                folds = walkforward_scores(table, ev.feature_names, splits=3)
+                st.session_state['walkforward'] = folds
+                st.session_state['walkforward_id'] = (news_key, label)
+            except Exception as exc:
+                st.error(f'Walk-forward 실행 오류: {exc}')
+        if st.session_state.get('walkforward_id') == (news_key, label):
+            st.dataframe(st.session_state['walkforward'], use_container_width=True)
+        st.download_button('시험 구간 예측 내역 CSV 저장', csv_bytes(with_provenance(ev.prediction_rows, source_meta, selected_name)),
+                           file_name='market_pulse_backtest.csv', mime='text/csv')
+    else:
+        st.info('먼저 AI 예측 탭에서 모델을 계산하면 시험 구간 검증이 표시됩니다.')
+    z_points = [1.5,2.,2.5,3.,3.5,4.]
+    z_counts = []
+    for threshold in z_points:
+        computed = calculate_indicators(selected_raw, win, threshold, vol_limit)
+        clipped = trim_period(computed, start, end)
+        z_counts.append(int(clipped['PriceJump'].sum()))
+    fig = go.Figure(go.Bar(x=[str(q) for q in z_points], y=z_counts,
+                           marker_color=BLUE, text=z_counts, textposition='outside'))
+    fig.update_layout(title='Z점수 문턱값 변경에 따른 과거 가격 급변 건수',
+                      xaxis_title='Z 기준', yaxis_title='탐지 건수')
+    st.plotly_chart(theme_plot(fig, 325), use_container_width=True)
+    st.caption('탐지 건수 변화는 검출 민감도이지 미래 예측 정확도가 아닙니다.')
+
+with p_data:
+    st.subheader('수집 상태·입력 형식·계산 원리')
+    provenance = pd.DataFrame([{'종목': name, **source_meta[name]} for name in raw_data])
+    st.dataframe(provenance, use_container_width=True, hide_index=True)
+    st.download_button('수집 출처 메타데이터 CSV', csv_bytes(provenance),
+                       file_name='market_pulse_provenance.csv', mime='text/csv')
+    with st.expander('계산 원리 / 미래 정보 누출 방지', expanded=True):
+        st.markdown('''
+- **일일 수익률**: `(Close[t]/Close[t-1] - 1) × 100`
+- **N일 변동성**: 당일 포함 최근 N개 일일 수익률의 표본표준편차(연율화하지 않음)
+- **과거 급변 Z점수**: `abs(Return[t]-평균[직전 N개 수익률]) / 표준편차[직전 N개 수익률]`
+- **거래량 배율**: `Volume[t] / 평균[직전 N거래일 거래량]`
+- **RSI**: 최근 상승·하락 크기의 상대적 강도. **MACD**: 12/26 EMA 차이와 9 EMA 신호선.
+- **다음 거래일 타깃**: `Close[t+1] > Close[t]`. t 날짜의 피처에는 `t+1`이 포함되지 않습니다.
+- **뉴스 시점**: 최초 확인 시각 및 공개 시각이 모두 t일 16:00 KST 이전에 확인된 기사만 t일 예측의 피처로 사용할 수 있습니다.
+- **MDD**: 선택 기간에서 이전 누적 최고 종가에 비해 가장 크게 하락한 비율.
+
+표준편차나 이전 거래량이 0인 경우 기존 급변 탐지 엔진은 별도 예외 처리 규칙을 사용합니다.
+''')
+    with st.expander('실제 데이터·가상 데이터·시세의 한계', expanded=True):
+        st.markdown('''
+- FinanceDataReader의 날짜별 OHLCV는 **실시간 체결가·호가·현재 매수·매도 잔량**이 아닙니다.
+- 저장 캐시를 사용했다면 마지막 거래일과 수집 시각을 확인하세요.
+- 거래량은 체결된 주식 수이지 기업 매출액이나 매도 주문량이 아닙니다.
+- 액면분할, 배당, 권리락 등 기업행동은 원시 가격 변화의 해석을 왜곡할 수 있습니다.
+- 뉴스 감성은 문장 규칙의 결과이며 뉴스 인과관계나 실제 가격 예측 확률이 아닙니다.
+- AI 모델은 탐색적 확률 분류기이며 미래 주가·수익을 보장하지 않습니다.
+- 가상 데이터는 시장 데이터가 아닌 컴퓨터가 생성한 시연값입니다.
+''')
+    with st.expander('API 키 설정 및 실행 오류'):
+        st.markdown('''
+- API 키는 `.env`/환경변수 또는 `.streamlit/secrets.toml`에 저장하고 GitHub에 공개하지 마세요.
+- `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`: 네이버 뉴스 검색용.
+- `DART_API_KEY`: 금융감독원 전자공시 조회용.
+- API 요청이 실패하더라도 프로그램이 기사나 주가를 만들어 실제 데이터라고 표시하지 않습니다.
+- Python 설치: `python -m pip install -r requirements.txt`
+- 실행: `python -m streamlit run app.py`
+- 테스트: `python -m pytest -q`
+''')
 
 st.divider()
-st.caption("MARKET PULSE · 수행평가용 교육 프로젝트 | 시세 분석 도구이며 금융상품 매수·매도 조언 또는 미래 주가 예측 도구가 아닙니다.")
+st.caption('MARKET PULSE · 교육/연구 전용 · 데이터 출처와 기준시각 확인 필수 · 특정 종목 매매 지시/투자 자문이 아닙니다.')
