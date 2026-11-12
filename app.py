@@ -21,7 +21,7 @@ from stock_core import (
 )
 from market_data import fetch_historical, list_domestic_stocks, price_snapshot, MarketResult
 from technical_indicators import add_indicators
-from news_collector import fetch_naver_news, read_news_csv, normalize_articles
+from news_collector import fetch_naver_news, normalize_articles
 from news_analyzer import analyze_articles
 from disclosure_collector import fetch_disclosures
 from prediction_model import run_experiments
@@ -30,7 +30,8 @@ from model_explainer import describe_logistic_model
 from market_calendar import is_krx_holiday
 from market_ui import make_rows, order_rows, market_table_html, watch_card_html, css as market_css
 from stock_catalog import CATALOG, DEFAULT_SELECTED, STOCK_SECTORS, filter_catalog
-from langchain_analysis import ai_ready, analyze_news_ai, explain_prediction_ai
+from langchain_analysis import ai_ready, analyze_news_ai, analyze_link_ai, explain_prediction_ai
+from article_link import fetch_public_article, ArticleFetchError
 from news_store import load_news, merge_news
 from kis_market import (
     KISReadOnlyClient, fetch_kis_historical, kis_credentials_ready, fetch_kis_trade_volume,
@@ -55,7 +56,21 @@ st.markdown(f"""
 .stApp {{background:{BG}; color:{TEXT};}}
 .block-container {{max-width: 1500px; padding-top: 1.0rem;}}
 [data-testid="stSidebar"] {{background:#f1f4f9; border-right:1px solid {BORDER};}}
+[data-testid="stSidebar"] * {{color:#1f2937;}}
+[data-testid="stSidebar"] .stRadio label p, [data-testid="stSidebar"] .stCheckbox label p,
+[data-testid="stSidebar"] .stSelectbox label p, [data-testid="stSidebar"] .stMultiSelect label p,
+[data-testid="stSidebar"] .stTextInput label p, [data-testid="stSidebar"] .stDateInput label p,
+[data-testid="stSidebar"] .stSlider label p, [data-testid="stSidebar"] .stMarkdown p,
+[data-testid="stSidebar"] .stCaption, [data-testid="stSidebar"] summary {{color:#1f2937 !important;}}
+[data-testid="stSidebar"] div[data-baseweb="select"] > div,
+[data-testid="stSidebar"] .stDateInput > div > div,
+[data-testid="stSidebar"] .stTextInput > div > div,
+[data-testid="stSidebar"] .stMultiSelect > div > div {{background:#ffffff; color:#111827; border:1px solid {BORDER};}}
+[data-testid="stSidebar"] .stRadio [role="radiogroup"] label {{background:#ffffff; border:1px solid {BORDER}; border-radius:12px; padding:6px 10px; margin-bottom:6px;}}
+[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:hover {{background:#f8fafc;}}
 [data-testid="stMetric"] {{background:{CARD}; border:1px solid {BORDER}; border-radius:16px; padding:14px 16px; box-shadow:0 2px 10px rgba(15,23,42,.04);}}
+[data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p {{color:#57647a !important;}}
+[data-testid="stMetricValue"], [data-testid="stMetricValue"] div {{color:#142334 !important;}}
 .stButton > button {{border-radius:12px; border:1px solid {BORDER};}}
 .stDownloadButton > button {{border-radius:12px;}}
 div[data-baseweb="select"] > div, .stDateInput > div > div, .stTextInput > div > div {{border-radius:12px;}}
@@ -63,7 +78,7 @@ div[data-baseweb="select"] > div, .stDateInput > div > div, .stTextInput > div >
 .mp-title {{font-size:2rem; font-weight:850; color:{TEXT}; letter-spacing:-0.02em;}}
 .mp-sub {{font-size:.95rem; color:{SUBTLE}; margin-top:5px;}}
 .mp-chip {{display:inline-block; padding:6px 12px; border-radius:999px; background:#ecfdf3; color:{ACCENT_DARK}; border:1px solid #ccf2db; font-size:.78rem; font-weight:650; margin-top:12px; margin-right:8px;}}
-.mp-card {{background:{CARD}; border:1px solid {BORDER}; border-radius:18px; padding:16px 18px; box-shadow:0 4px 12px rgba(15,23,42,.04); height:100%;}}
+.mp-card {{background:{CARD}; color:{TEXT}; border:1px solid {BORDER}; border-radius:18px; padding:16px 18px; box-shadow:0 4px 12px rgba(15,23,42,.04); height:100%;}}
 .mp-section-title {{font-size:1.05rem; font-weight:800; color:{TEXT}; margin-bottom:12px;}}
 .mp-note {{color:{SUBTLE}; font-size:.84rem;}}
 .mp-sidebar-label {{font-size:.8rem; color:{SUBTLE}; font-weight:700; text-transform:uppercase; letter-spacing:.06em; margin:10px 0 6px;}}
@@ -223,9 +238,20 @@ def get_online(code: str, start: date, end: date, backend: str = 'fdr') -> Marke
     raise StockDataError('인식할 수 없는 시세 데이터 제공처입니다.')
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def get_article_by_link(url: str):
+    # Network requests only happen after the user submits a news link.
+    return fetch_public_article(url)
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_krx_listing() -> pd.DataFrame:
     return list_domestic_stocks()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def compute_indicators_cached(raw: pd.DataFrame, window: int, z_limit: float, vol_limit: float) -> pd.DataFrame:
+    return calculate_indicators(raw, window=window, z_limit=z_limit, q_limit=vol_limit)
 
 
 def build_market_board(results: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -260,61 +286,70 @@ with st.sidebar:
     st.markdown('<div class="mp-sidebar-label">기능 메뉴</div>', unsafe_allow_html=True)
     page = st.radio('메뉴', ['🏠 홈 대시보드', '📈 국내 시세 보드', '🔎 종목 상세', '🚨 급변 탐지', '📰 뉴스·공시', '🤖 AI 예측', '🧪 백테스트', '⚙️ 데이터 센터'], label_visibility='collapsed')
     page = page.split(' ', 1)[1]
+
     st.markdown('<div class="mp-sidebar-label">데이터 설정</div>', unsafe_allow_html=True)
-    mode = st.radio('데이터 출처', ['국내 주식 실데이터', 'CSV 직접 업로드'], help='실데이터는 인터넷이 필요합니다.')
-    backend = 'fdr'
-    if mode == '국내 주식 실데이터':
-        backend = st.radio('시세 제공처', ['fdr', 'kis'], format_func=lambda s: 'FinanceDataReader (NAVER → KRX)' if s == 'fdr' else 'KIS Open API (조회 전용)')
-        if backend == 'kis' and not kis_credentials_ready():
-            st.warning('KIS 인증키가 없어 FinanceDataReader 사용을 권장합니다.')
-    start = st.date_input('분석 시작일', value=DEFAULT_START, format='YYYY-MM-DD')
-    end = st.date_input('분석 종료일', value=DEFAULT_END, format='YYYY-MM-DD')
-    with st.expander('고급 분석 기준', expanded=False):
-        win = st.slider('비교 기간(거래일)', 10, 60, 20, 5)
-        z_limit = st.slider('가격 급변 Z기준', 1.5, 4.0, 2.5, .5)
-        vol_limit = st.slider('거래량 급증 배율', 1.2, 3.0, 1.5, .1)
-    st.markdown('<div class="mp-sidebar-label">종목 선택</div>', unsafe_allow_html=True)
-    selection: dict[str, str] = {}
-    uploads = []
-    if mode == '국내 주식 실데이터':
-        chosen = st.multiselect('분석 종목 (30개 중 최대 6개)', list(STOCKS),
-                                default=DEFAULT_SELECTED, max_selections=6,
-                                help='30개를 한꺼번에 조회하면 API 호출 제한과 지연이 발생할 수 있습니다.')
-        st.caption(f'관심종목 {len(STOCKS)}개 중 {len(chosen)}개 선택 · 가격은 선택한 종목만 다운로드')
-        selection.update({name: STOCKS[name] for name in chosen})
-        extra = st.text_input('추가 종목코드(6자리)', placeholder='예: 005930')
-        if extra:
-            if len(extra) == 6 and extra.isdigit() and extra not in selection.values():
-                selection[f'종목 {extra}'] = extra
-            elif not (len(extra) == 6 and extra.isdigit()):
-                st.warning('6자리 숫자 종목코드를 입력하세요.')
-        if st.button('KRX 종목 검색 열기', use_container_width=True):
-            try:
-                st.session_state['krx_listing'] = get_krx_listing()
-            except Exception as exc:
-                st.warning(f'목록 조회 실패: {type(exc).__name__}')
-        if 'krx_listing' in st.session_state:
-            q = st.text_input('기업명/종목코드 검색')
-            if q:
-                catalog = st.session_state['krx_listing']
-                matching = catalog[catalog['Name'].str.contains(q, regex=False, case=False, na=False) | catalog['Code'].str.contains(q, regex=False, na=False)].head(60)
-                if not matching.empty:
-                    options = {f"{r.Name} ({r.Code})": (r.Name, r.Code) for r in matching.itertuples()}
-                    opt = st.selectbox('검색 결과', list(options))
-                    if st.button('검색 종목 추가', use_container_width=True):
-                        nm, co = options[opt]
-                        st.session_state['extra_stock'] = (nm, co)
-                        st.rerun()
-            if 'extra_stock' in st.session_state:
-                nm, co = st.session_state['extra_stock']
-                selection[nm] = co
-        if st.button('가격 캐시 재조회', use_container_width=True):
-            get_online.clear()
-            st.rerun()
-    else:
-        uploads = st.file_uploader('주식 CSV 업로드', type='csv', accept_multiple_files=True)
+    with st.form('sidebar_controls', clear_on_submit=False):
+        mode = st.radio('데이터 출처', ['국내 주식 실데이터', 'CSV 직접 업로드'], help='실데이터는 인터넷이 필요합니다.')
+        backend = 'fdr'
+        if mode == '국내 주식 실데이터':
+            backend = st.radio('시세 제공처', ['fdr', 'kis'], format_func=lambda s: 'FinanceDataReader (NAVER → KRX)' if s == 'fdr' else 'KIS Open API (조회 전용)')
+            if backend == 'kis' and not kis_credentials_ready():
+                st.warning('KIS 인증키가 없어 FinanceDataReader 사용을 권장합니다.')
+        start = st.date_input('분석 시작일', value=DEFAULT_START, format='YYYY-MM-DD')
+        end = st.date_input('분석 종료일', value=DEFAULT_END, format='YYYY-MM-DD')
+        with st.expander('고급 분석 기준', expanded=False):
+            win = st.slider('비교 기간(거래일)', 10, 60, 20, 5)
+            z_limit = st.slider('가격 급변 Z기준', 1.5, 4.0, 2.5, .5)
+            vol_limit = st.slider('거래량 급증 배율', 1.2, 3.0, 1.5, .1)
+
+        st.markdown('<div class="mp-sidebar-label">종목 선택</div>', unsafe_allow_html=True)
+        selection: dict[str, str] = {}
+        uploads = []
+        if mode == '국내 주식 실데이터':
+            chosen = st.multiselect('분석 종목 (30개 중 최대 6개)', list(STOCKS),
+                                    default=DEFAULT_SELECTED[:3], max_selections=6,
+                                    help='30개를 한꺼번에 조회하면 API 호출 제한과 지연이 발생할 수 있습니다.')
+            st.caption(f'관심종목 {len(STOCKS)}개 중 {len(chosen)}개 선택 · 가격은 선택한 종목만 다운로드')
+            selection.update({name: STOCKS[name] for name in chosen})
+            extra = st.text_input('추가 종목코드(6자리)', placeholder='예: 005930')
+            if extra:
+                if len(extra) == 6 and extra.isdigit() and extra not in selection.values():
+                    selection[f'종목 {extra}'] = extra
+                elif not (len(extra) == 6 and extra.isdigit()):
+                    st.warning('6자리 숫자 종목코드를 입력하세요.')
+        else:
+            uploads = st.file_uploader('주식 CSV 업로드', type='csv', accept_multiple_files=True)
+
+        submitted = st.form_submit_button('설정 적용', use_container_width=True, type='primary')
+
+    if mode == '국내 주식 실데이터' and st.button('KRX 종목 검색 열기', use_container_width=True):
+        try:
+            st.session_state['krx_listing'] = get_krx_listing()
+        except Exception as exc:
+            st.warning(f'목록 조회 실패: {type(exc).__name__}')
+    if 'krx_listing' in st.session_state and mode == '국내 주식 실데이터':
+        q = st.text_input('기업명/종목코드 검색')
+        if q:
+            catalog = st.session_state['krx_listing']
+            matching = catalog[catalog['Name'].str.contains(q, regex=False, case=False, na=False) | catalog['Code'].str.contains(q, regex=False, na=False)].head(60)
+            if not matching.empty:
+                options = {f"{r.Name} ({r.Code})": (r.Name, r.Code) for r in matching.itertuples()}
+                opt = st.selectbox('검색 결과', list(options))
+                if st.button('검색 종목 추가', use_container_width=True):
+                    nm, co = options[opt]
+                    st.session_state['extra_stock'] = (nm, co)
+                    st.rerun()
+        if 'extra_stock' in st.session_state:
+            nm, co = st.session_state['extra_stock']
+            selection[nm] = co
+
+    if mode == '국내 주식 실데이터' and st.button('가격 캐시 재조회', use_container_width=True):
+        get_online.clear()
+        compute_indicators_cached.clear()
+        st.rerun()
+
     st.markdown('<div class="mp-sidebar-label">안내</div>', unsafe_allow_html=True)
-    st.markdown('<div class="mp-nav-hint">실데이터는 과거 일별 시세입니다. 실시간 체결가가 아닙니다.<br>CSV 모드는 실제 출처를 직접 확인한 데이터만 사용하세요.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="mp-nav-hint">실데이터는 과거 일별 시세입니다. 실시간 체결가가 아닙니다.<br>설정은 <strong>설정 적용</strong> 버튼을 눌렀을 때만 반영되어 불필요한 재실행과 렉을 줄입니다.<br>CSV 모드는 실제 출처를 직접 확인한 데이터만 사용하세요.</div>', unsafe_allow_html=True)
 
 if start > end:
     st.error('분석 시작일이 종료일보다 늦습니다.')
@@ -361,7 +396,7 @@ if not raw_data:
 results: dict[str, pd.DataFrame] = {}
 for name, raw in raw_data.items():
     try:
-        analyzed = calculate_indicators(raw, window=win, z_limit=z_limit, q_limit=vol_limit)
+        analyzed = compute_indicators_cached(raw, win, z_limit, vol_limit)
         results[name] = trim_period(analyzed, start, end)
     except (StockDataError, ValueError, TypeError) as exc:
         st.warning(f'{name}: 분석 불가 - {exc}')
@@ -372,7 +407,6 @@ if not results:
 results, _aligned = common_date_align(results)
 summary = summarize(results)
 events = event_table(results)
-board = build_market_board(raw_data)
 if summary.empty:
     st.error('선택 기간에 분석 가능한 날짜가 없습니다.')
     st.stop()
@@ -415,7 +449,7 @@ if mode == '국내 주식 실데이터' and page == '홈 대시보드':
 news_key = f'{mode}|{selected_code or selected_name}'
 if 'news_by_symbol' not in st.session_state:
     st.session_state['news_by_symbol'] = {}
-if selected_code and news_key not in st.session_state['news_by_symbol']:
+if page in {'뉴스·공시', 'AI 예측', '백테스트'} and selected_code and news_key not in st.session_state['news_by_symbol']:
     st.session_state['news_by_symbol'][news_key] = load_news(selected_code)
 
 if page == '홈 대시보드':
@@ -541,7 +575,7 @@ elif page == '급변 탐지':
     z_points = [1.5,2.0,2.5,3.0,3.5,4.0]
     counts = []
     for threshold in z_points:
-        computed = calculate_indicators(selected_raw, win, threshold, vol_limit)
+        computed = compute_indicators_cached(selected_raw, win, threshold, vol_limit)
         clipped = trim_period(computed, start, end)
         counts.append(int(clipped['PriceJump'].sum()))
     fig = go.Figure(go.Bar(x=[str(z) for z in z_points], y=counts, marker_color=ACCENT_DARK, text=counts, textposition='outside'))
@@ -555,8 +589,52 @@ elif page == '뉴스·공시':
     st.caption('연결 상태 · NAVER 뉴스: ' + ('설정 완료' if status['NAVER_CLIENT_ID'] and status['NAVER_CLIENT_SECRET'] else '키 없음')
                + ' · OpenDART: ' + ('설정 완료' if status['DART_API_KEY'] else '키 없음')
                + ' · LangChain AI: ' + ('설정 완료' if ai_ready() else '키 없음'))
+    st.markdown('##### 🔗 기사 URL 직접 분석 · 네이버 API/CSV 불필요')
+    st.caption('뉴스 기사 링크를 붙여 넣으면 공개된 기사 본문을 추출해 Grok에 전달합니다. 본문 접근이 안 되면 공개된 제목·요약만 분석하거나 실패 이유를 표시합니다. URL을 넣었다고 자동으로 호출하지 않으며 버튼을 누를 때만 실행합니다.')
+    with st.form('direct_article_analysis_form', clear_on_submit=False):
+        input_news_url = st.text_input('뉴스 기사 링크', placeholder='https://n.news.naver.com/mnews/article/…', key='manual_news_url')
+        submit_news_link = st.form_submit_button('기사 링크 불러와 Grok으로 분석', type='primary',
+                                                  disabled=not ai_ready(), use_container_width=True)
+    if not ai_ready():
+        st.warning('Grok API 키를 읽지 못했습니다. 실제 프로젝트의 `.streamlit/secrets.toml`에 XAI_API_KEY를 설정하고 앱을 다시 시작하세요.')
+    direct_context = (selected_name, input_news_url.strip())
+    if submit_news_link:
+        st.session_state.pop('direct_article_result', None)
+        st.session_state.pop('direct_article_context', None)
+        try:
+            with st.spinner('공개 기사 내용을 읽어 Grok에 분석을 요청하는 중입니다...'):
+                article = get_article_by_link(input_news_url)
+                brief = analyze_link_ai(selected_name, article)
+            st.session_state['direct_article_result'] = (article, brief)
+            st.session_state['direct_article_context'] = direct_context
+        except ArticleFetchError as exc:
+            st.error(f'기사 불러오기 실패: {exc}')
+        except Exception as exc:
+            st.error(f'Grok 분석 요청 실패: {type(exc).__name__} (키 권한, 모델 설정, 이용 한도 또는 인터넷 연결을 확인하세요.)')
+    if st.session_state.get('direct_article_context') == direct_context and 'direct_article_result' in st.session_state:
+        article, direct_brief = st.session_state['direct_article_result']
+        st.success('기사 URL 분석이 완료되었습니다.')
+        st.markdown(f'**기사 제목:** {article.title}')
+        st.caption(f'출처: {article.publisher} · 분석한 자료: {article.basis} · 수집 시각(UTC): {article.fetched_at}')
+        st.link_button('원문 링크 확인', article.url)
+        st.write(f"**기사 관점:** {direct_brief['sentiment']} · {direct_brief['overview']}")
+        u1, u2 = st.columns(2)
+        with u1:
+            st.markdown('**긍정적인 요인**')
+            for line in direct_brief['positive_factors']:
+                st.write('• ' + line)
+        with u2:
+            st.markdown('**부정적인 요인**')
+            for line in direct_brief['negative_factors']:
+                st.write('• ' + line)
+        st.markdown('**불확실성·분석 한계**')
+        for line in direct_brief['uncertainties']:
+            st.write('• ' + line)
+        st.caption(direct_brief['method'])
+    st.divider()
+    st.markdown('##### 뉴스 검색 API를 이용한 여러 기사 비교 (선택 사항)')
     if not selected_code:
-        st.info('뉴스 자동 수집과 캐시는 국내 주식 실데이터 모드에서 종목을 선택해 주세요.')
+        st.info('뉴스 자동 수집과 캐시는 국내 주식 실데이터 모드에서 종목을 선택해 주세요. 위의 URL 분석은 별도로 사용할 수 있습니다.')
     c1, c2 = st.columns(2)
     with c1:
         if st.button('최신 실제 뉴스 가져오기', disabled=(not selected_code) or not
@@ -582,14 +660,6 @@ elif page == '뉴스·공시':
                 st.success(f'공시 자료 {len(filings)}건 조회')
             except Exception as exc:
                 st.error(f'공시 조회 실패: {type(exc).__name__}: {str(exc)[:170]}')
-    with st.expander('기존 뉴스 CSV 가져오기', expanded=False):
-        upload_news = st.file_uploader('뉴스 메타데이터 CSV', type='csv', key='news_csv_input')
-        if upload_news and st.button('뉴스 CSV 적용'):
-            try:
-                st.session_state['news_by_symbol'][news_key] = read_news_csv(upload_news.getvalue())
-                st.success('업로드한 자료가 적용되었습니다. 출처와 최초 확인 시각은 사용자가 확인해야 합니다.')
-            except Exception as exc:
-                st.error(f'CSV 형식 확인 필요: {exc}')
     current_news = st.session_state['news_by_symbol'].get(news_key, pd.DataFrame())
     if current_news is not None and not current_news.empty:
         analyzed_news = analyze_articles(current_news)
@@ -642,7 +712,7 @@ elif page == '뉴스·공시':
         elif not ai_ready():
             st.info('LangChain 기능을 사용하려면 XAI_API_KEY가 필요합니다. 키 없이도 실제 기사 조회와 규칙 기반 분석은 사용할 수 있습니다.')
     else:
-        st.info('아직 뉴스가 없습니다. 네이버 API 키를 설정하고 실제 뉴스를 수집해 주세요. 가상 기사를 표시하지 않습니다.')
+        st.info('자동 뉴스 수집 자료는 아직 없습니다. 위의 기사 URL 직접 분석은 네이버 API 키 없이도 사용할 수 있습니다.')
 
 elif page == 'AI 예측':
     st.markdown('#### 통계 모델 + LangChain 뉴스 시나리오')

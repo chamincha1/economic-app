@@ -8,3 +8,4 @@ requests>=2.31,<3
 
 # Optional runtime LLM provider; no API call without user action and key.
 langchain-xai>=1.3,<2
+beautifulsoup4>=4.12,<5  # 공개 뉴스 페이지에서 본문 추출
