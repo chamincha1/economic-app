@@ -15,6 +15,18 @@
  <div class="brand"><img src="/assets/logo.png" alt="" width="39" height="39" loading="eager"/><div><strong>MARKET <em>PULSE</em></strong><small>DATA INTELLIGENCE</small></div></div>
  <div class="side-title">기능 메뉴</div>
  <nav id="nav" class="nav"></nav>
+ <div class="watch-panel" aria-label="관심종목 설정">
+   <div class="watch-heading">관심종목 <span id="watch-count">6개</span></div>
+   <form id="watch-form" autocomplete="off">
+     <label class="watch-label" for="watch-search">기업명 또는 6자리 코드</label>
+     <div class="watch-form-row"><input id="watch-search" class="watch-input" type="text" maxlength="40" placeholder="예: 삼성전자, 005930"/><button type="submit" class="watch-add" title="관심종목 추가" aria-label="관심종목 추가">추가</button></div>
+   </form>
+   <div id="watch-suggestions" class="watch-suggestions" aria-live="polite"></div>
+   <div id="watch-items" class="watch-items"></div>
+   <button class="watch-refresh" id="watch-refresh" type="button">↻ 관심종목 가격 새로고침</button>
+   <button class="watch-krx-search" id="watch-krx-search" type="button">전체 KRX 종목명 검색</button>
+   <p class="watch-hint">30개 기본 목록 + 6자리 국내 종목코드 추가 · CSV 없이 자동 시세 조회</p>
+ </div>
  <div class="sidebar-bottom"><span class="dot"></span> MARKET PULSE 로컬 서버 <small>과거 일별 시세 · 마지막 거래일 표시</small></div>
 </aside>
 <main class="main">

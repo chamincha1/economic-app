@@ -20,7 +20,7 @@ from threading import Timer
 
 from groq_client import configured, analyze, GroqError, remaining_today
 from article_link import fetch_public_article, ArticleFetchError
-from market_api import recent_prices, predictor, MarketAPIError
+from market_api import recent_prices, cached_prices, predictor, search_stocks, MarketAPIError
 from stock_catalog import CATALOG
 
 ROOT = Path(__file__).resolve().parent
@@ -45,7 +45,7 @@ class UserInputError(ValueError):
 
 
 class AppHandler(SimpleHTTPRequestHandler):
-    server_version = 'MarketPulseLocal/2.0'
+    server_version = 'MarketPulseLocal/2.1'
     sys_version = ''
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -95,7 +95,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         try:
             uri = urlsplit(self.path)
-            if uri.path in ('/api/health', '/api/catalog', '/api/stock'):
+            if uri.path in ('/api/health', '/api/catalog', '/api/stock', '/api/stock/cached', '/api/search'):
                 if uri.path == '/api/health':
                     return self._json({'ok': True, 'app': 'MARKET PULSE', 'engine': 'python-local',
                                        'market': 'historical_daily', 'realtime': False,
@@ -104,8 +104,13 @@ class AppHandler(SimpleHTTPRequestHandler):
                 if uri.path == '/api/catalog':
                     return self._json([{'name': n, 'code': c, 'sector': s} for n, c, s in CATALOG])
                 params = parse_qs(uri.query)
+                if uri.path == '/api/search':
+                    return self._json({'ok': True, 'results': search_stocks(params.get('q', [''])[0])})
                 code = params.get('code', [''])[0]
                 days = int(params.get('days', ['450'])[0])
+                if uri.path == '/api/stock/cached':
+                    try: return self._json({'ok': True, **cached_prices(code, days=days)})
+                    except MarketAPIError as exc: return self._error(exc, 404)
                 force = params.get('refresh', ['0'])[0] == '1'
                 if not fetch_slots.acquire(blocking=False):
                     return self._error(UserInputError('다른 자료 조회가 진행 중입니다. 잠시 후 다시 시도하세요.'), 503)
