@@ -1,22 +1,16 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-where py >nul 2>nul
-if %errorlevel%==0 (
-  set "PY_CMD=py -3"
-) else (
-  set "PY_CMD=python"
+echo [MARKET PULSE] 시작 중...
+python -c "import pandas,numpy,sklearn,requests,bs4,FinanceDataReader" 2>nul
+if errorlevel 1 (
+  echo 처음 실행 시 필요한 Python 패키지를 설치합니다.
+  python -m pip install -r requirements.txt
+  if errorlevel 1 (
+    echo 설치에 실패했습니다. 위의 오류를 확인하세요.
+    pause
+    exit /b 1
+  )
 )
-if not exist ".venv\Scripts\python.exe" (
-  %PY_CMD% -m venv ".venv"
-  if errorlevel 1 goto :error
-)
-".venv\Scripts\python.exe" -m pip install -r requirements.txt
-if errorlevel 1 goto :error
-".venv\Scripts\python.exe" -m streamlit run app.py
-exit /b 0
-:error
-echo.
-echo Python 3.10+ required. Check installation, internet, and requirements.txt
-pause
-exit /b 1
+python app_server.py
+if errorlevel 1 pause

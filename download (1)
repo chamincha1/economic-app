@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+node_modules/
+dist/
+data_cache/*.csv
+data_cache/*.json
+*.log
+.DS_Store
+data_cache/ai_usage.json
+data_cache/ai_usage.tmp

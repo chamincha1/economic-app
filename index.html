@@ -12,17 +12,17 @@
 <body>
 <div class="shell">
 <aside class="sidebar" aria-label="주요 메뉴">
- <div class="brand"><img src="/assets/favicon.svg" alt="" width="39" height="39"/><div><strong>MARKET <em>PULSE</em></strong><small>DATA INTELLIGENCE</small></div></div>
+ <div class="brand"><img src="/assets/logo.png" alt="" width="39" height="39" loading="eager"/><div><strong>MARKET <em>PULSE</em></strong><small>DATA INTELLIGENCE</small></div></div>
  <div class="side-title">기능 메뉴</div>
  <nav id="nav" class="nav"></nav>
- <div class="sidebar-bottom"><span class="dot"></span> 웹 미리보기 서버 실행 중 <small>실제 주가 값은 CSV 업로드 시에만 표시</small></div>
+ <div class="sidebar-bottom"><span class="dot"></span> MARKET PULSE 로컬 서버 <small>과거 일별 시세 · 마지막 거래일 표시</small></div>
 </aside>
 <main class="main">
- <header class="topbar"><div class="breadcrumb">MARKET PULSE <span>/</span> <span id="current-page">홈 대시보드</span></div><div class="top-meta"><span class="tag">의존성 0개</span> <span class="tag tag-green">로컬 데이터 분석</span></div></header>
- <div class="content"><section class="hero"><div><span class="eyebrow">KOREA MARKET · DATA ANALYTICS</span><h1 id="page-heading">시장 데이터, 더 명확하게</h1><p id="page-lead">실제 업로드한 데이터만으로 분석하는 MARKET PULSE 웹 미리보기</p></div><div class="hero-art" aria-hidden="true"><svg viewBox="0 0 160 92"><path d="M1 61L33 61L46 43L63 68L87 20L110 45L137 18L159 10" fill="none" stroke="#5de5b7" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><path d="M142 9L160 10L158 28" stroke="#5de5b7" stroke-width="5" fill="none"/></svg></div></section>
- <div id="notice" class="notice" role="status"><strong>웹 미리보기 실행 준비 완료.</strong> 이 화면은 CSV 기반 분석용입니다. 기존 Python AI·실시간 데이터 수집 기능은 웹 미리보기에 연결되지 않았습니다.</div>
+ <header class="topbar"><div class="breadcrumb">MARKET PULSE <span>/</span> <span id="current-page">홈 대시보드</span></div><div class="top-meta"><span class="tag" id="source-tag">과거 일봉 데이터</span> <span class="tag tag-green" id="ai-tag">AI 연결 확인 중</span></div></header>
+ <div class="content"><section class="hero"><div><span class="eyebrow">KOREA MARKET · DATA ANALYTICS</span><h1 id="page-heading">시장 데이터, 더 명확하게</h1><p id="page-lead">선택한 종목의 실제 일봉 데이터와 공개 기사 근거를 분석하는 MARKET PULSE</p></div><div class="hero-art" aria-hidden="true"><svg viewBox="0 0 160 92"><path d="M1 61L33 61L46 43L63 68L87 20L110 45L137 18L159 10" fill="none" stroke="#5de5b7" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><path d="M142 9L160 10L158 28" stroke="#5de5b7" stroke-width="5" fill="none"/></svg></div></section>
+ <div id="notice" class="notice" role="status"><strong>시스템 시작 중.</strong> 실제 종목 시세는 일별 종가 기준이며 실시간 체결가가 아닙니다.</div>
  <section id="content" aria-live="polite"></section>
- <footer>MARKET PULSE · 교육용 데이터 분석 · 실시간 시세·투자 조언 아님</footer></div>
+ <footer>MARKET PULSE · 교육용 데이터 분석 · 실시간 체결가 아님 · 결과는 투자 조언이 아닙니다</footer></div>
 </main>
 </div>
 <script type="module" src="/src/app.js"></script>

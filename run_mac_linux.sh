@@ -1,7 +1,5 @@
-#!/usr/bin/env sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 cd "$(dirname "$0")"
-if [ ! -d .venv ]; then python3 -m venv .venv; fi
-. .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m streamlit run app.py
+python3 -c 'import pandas,numpy,sklearn,requests,bs4,FinanceDataReader' 2>/dev/null || python3 -m pip install -r requirements.txt
+python3 app_server.py
