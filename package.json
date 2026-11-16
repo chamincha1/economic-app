@@ -1,0 +1,19 @@
+{
+  "name": "market-pulse-ai-studio",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A dependency-free, runnable preview for the MARKET PULSE Python application",
+  "scripts": {
+    "dev": "node server.mjs",
+    "start": "node server.mjs",
+    "build": "node scripts/build.mjs",
+    "preview": "node server.mjs --dist",
+    "test": "node --test tests_web/*.test.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "engines": {
+    "node": ">=20"
+  }
+}
