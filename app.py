@@ -588,21 +588,21 @@ elif page == '뉴스·공시':
     status = secret_status()
     st.caption('연결 상태 · NAVER 뉴스: ' + ('설정 완료' if status['NAVER_CLIENT_ID'] and status['NAVER_CLIENT_SECRET'] else '키 없음')
                + ' · OpenDART: ' + ('설정 완료' if status['DART_API_KEY'] else '키 없음')
-               + ' · LangChain AI: ' + ('설정 완료' if ai_ready() else '키 없음'))
+               + ' · 로컬 Qwen AI: ' + ('연결됨' if ai_ready() else '서버 미연결'))
     st.markdown('##### 🔗 기사 URL 직접 분석 · 네이버 API/CSV 불필요')
-    st.caption('뉴스 기사 링크를 붙여 넣으면 공개된 기사 본문을 추출해 Grok에 전달합니다. 본문 접근이 안 되면 공개된 제목·요약만 분석하거나 실패 이유를 표시합니다. URL을 넣었다고 자동으로 호출하지 않으며 버튼을 누를 때만 실행합니다.')
+    st.caption('뉴스 기사 링크를 붙여 넣으면 공개된 기사 본문을 추출해 Qwen3 8B에 전달합니다. 본문 접근이 안 되면 공개된 제목·요약만 분석하거나 실패 이유를 표시합니다. URL을 넣었다고 자동으로 호출하지 않으며 버튼을 누를 때만 실행합니다.')
     with st.form('direct_article_analysis_form', clear_on_submit=False):
         input_news_url = st.text_input('뉴스 기사 링크', placeholder='https://n.news.naver.com/mnews/article/…', key='manual_news_url')
-        submit_news_link = st.form_submit_button('기사 링크 불러와 Grok으로 분석', type='primary',
+        submit_news_link = st.form_submit_button('기사 링크 불러와 Qwen3 8B로 분석', type='primary',
                                                   disabled=not ai_ready(), use_container_width=True)
     if not ai_ready():
-        st.warning('Grok API 키를 읽지 못했습니다. 실제 프로젝트의 `.streamlit/secrets.toml`에 XAI_API_KEY를 설정하고 앱을 다시 시작하세요.')
+        st.warning('LM Studio 로컬 API 서버가 연결되지 않았습니다. LM Studio에서 Qwen3 8B를 로드하고 서버를 켜 주세요. 주소: http://localhost:1235/v1')
     direct_context = (selected_name, input_news_url.strip())
     if submit_news_link:
         st.session_state.pop('direct_article_result', None)
         st.session_state.pop('direct_article_context', None)
         try:
-            with st.spinner('공개 기사 내용을 읽어 Grok에 분석을 요청하는 중입니다...'):
+            with st.spinner('공개 기사 내용을 읽어 Qwen3 8B에 분석을 요청하는 중입니다...'):
                 article = get_article_by_link(input_news_url)
                 brief = analyze_link_ai(selected_name, article)
             st.session_state['direct_article_result'] = (article, brief)
@@ -610,7 +610,7 @@ elif page == '뉴스·공시':
         except ArticleFetchError as exc:
             st.error(f'기사 불러오기 실패: {exc}')
         except Exception as exc:
-            st.error(f'Grok 분석 요청 실패: {type(exc).__name__} (키 권한, 모델 설정, 이용 한도 또는 인터넷 연결을 확인하세요.)')
+            st.error(f'Qwen3 8B 분석 요청 실패: {type(exc).__name__} (로컬 서버 주소(1235), 모델 로드, 메모리 상태를 확인하세요.)')
     if st.session_state.get('direct_article_context') == direct_context and 'direct_article_result' in st.session_state:
         article, direct_brief = st.session_state['direct_article_result']
         st.success('기사 URL 분석이 완료되었습니다.')
@@ -675,12 +675,12 @@ elif page == '뉴스·공시':
         st.caption('위 감성 점수는 키워드 규칙 분류 결과이며 주가 상승 확률이 아닙니다.')
         st.download_button('기사 메타데이터·감성 분석 CSV', csv_bytes(analyzed_news),
                            file_name='market_pulse_news.csv', mime='text/csv')
-        st.markdown('##### Grok 뉴스 분석')
-        st.caption('별도 LLM API 연결 시 실제 검색된 최근 기사 최대 12건의 제목·요약을 정성 분석합니다. API 사용 비용이 발생할 수 있습니다.')
+        st.markdown('##### Qwen3 8B 뉴스 분석')
+        st.caption('LM Studio 서버 연결 시 실제 검색된 최근 기사 최대 12건의 제목·요약을 정성 분석합니다. 외부 AI API 사용료는 발생하지 않습니다.')
         news_fingerprint = int(pd.util.hash_pandas_object(
             analyzed_news[['article_id', 'title', 'description', 'published_at']].astype(str), index=False).sum())
         brief_key = (news_key, news_fingerprint)
-        if st.button('Grok으로 기사 근거 분석', disabled=not ai_ready(), type='primary'):
+        if st.button('Qwen3 8B로 기사 근거 분석', disabled=not ai_ready(), type='primary'):
             try:
                 with st.spinner('기사 내용을 참고해 AI 분석을 작성합니다...'):
                     st.session_state['news_llm_brief'] = analyze_news_ai(selected_name, analyzed_news)
@@ -710,7 +710,7 @@ elif page == '뉴스·공시':
                     st.link_button(f"기사 {item['number']} 확인", item['url'])
             st.caption(brief['method'])
         elif not ai_ready():
-            st.info('LangChain 기능을 사용하려면 XAI_API_KEY가 필요합니다. 키 없이도 실제 기사 조회와 규칙 기반 분석은 사용할 수 있습니다.')
+            st.info('LangChain 기능을 사용하려면 LM Studio 로컬 API 서버가 필요합니다. 서버를 켜면 별도 유료 API 키 없이 사용 가능합니다.')
     else:
         st.info('자동 뉴스 수집 자료는 아직 없습니다. 위의 기사 URL 직접 분석은 네이버 API 키 없이도 사용할 수 있습니다.')
 
@@ -751,9 +751,9 @@ elif page == 'AI 예측':
                            file_name='market_pulse_predictions.csv', mime='text/csv')
         st.download_button('모델 성능 CSV', csv_bytes(with_provenance(p.summary, source_meta, selected_name)),
                            file_name='market_pulse_model_scores.csv', mime='text/csv')
-        st.markdown('##### 2. Grok 정성 예측 시나리오')
-        st.caption('현재 뉴스에는 모델 기준 거래일 **이후** 공개된 기사가 포함될 수 있습니다. 이는 정성적 추가 설명일 뿐 과거 수치 예측에 소급 반영한 데이터가 아닙니다. 별도 API 과금이 발생할 수 있습니다.')
-        if st.button('Grok 시나리오 생성', disabled=not ai_ready() or p.forecasts.empty):
+        st.markdown('##### 2. Qwen3 8B 정성 예측 시나리오')
+        st.caption('현재 뉴스에는 모델 기준 거래일 **이후** 공개된 기사가 포함될 수 있습니다. 이는 정성적 추가 설명일 뿐 과거 수치 예측에 소급 반영한 데이터가 아닙니다. 외부 AI API 사용료는 발생하지 않습니다.')
+        if st.button('Qwen3 8B 시나리오 생성', disabled=not ai_ready() or p.forecasts.empty):
             try:
                 chosen_model = '기술 지표 포함' if '기술 지표 포함' in p.forecasts['모델'].tolist() else p.forecasts.iloc[0]['모델']
                 fc = p.forecasts[p.forecasts['모델'] == chosen_model].iloc[0].to_dict()
@@ -764,7 +764,7 @@ elif page == 'AI 예측':
                 st.session_state['forecast_llm_brief'] = brief
                 st.session_state['forecast_llm_id'] = prediction_identity
             except Exception as exc:
-                st.error(f'Grok 시나리오 실패: {type(exc).__name__}: {str(exc)[:200]}')
+                st.error(f'Qwen3 8B 시나리오 실패: {type(exc).__name__}: {str(exc)[:200]}')
         if st.session_state.get('forecast_llm_id') == prediction_identity:
             brief = st.session_state['forecast_llm_brief']
             st.write(f"**정성 시나리오:** {brief['scenario']}")
@@ -788,7 +788,7 @@ elif page == 'AI 예측':
                     st.link_button(f"기사 {item['number']} 보기", item['url'])
             st.caption(brief['method'])
         elif not ai_ready():
-            st.caption('XAI_API_KEY를 설정하면 Grok 시나리오 버튼을 사용할 수 있습니다.')
+            st.caption('LM Studio 로컬 API 서버(1235)를 켜면 시나리오 버튼을 사용할 수 있습니다.')
     else:
         st.caption('먼저 정량 모델 실행 버튼을 눌러 실제 수집된 가격 데이터로 모델을 검증하세요.')
 
