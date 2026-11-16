@@ -9,7 +9,8 @@
     "start": "node server.mjs",
     "build": "node scripts/build.mjs",
     "preview": "node server.mjs --dist",
-    "test": "node --test tests_web/*.test.mjs"
+    "test": "node --test tests_web/*.test.mjs",
+    "check": "npm test && npm run build"
   },
   "dependencies": {},
   "devDependencies": {},

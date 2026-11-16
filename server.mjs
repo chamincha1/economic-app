@@ -39,6 +39,18 @@ export function createServer(base=publicRoot) {
   });
 }
 if(process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
-  const port=Number(process.env.PORT)||3000;
-  createServer().listen(port,'0.0.0.0',()=>console.log(`MARKET PULSE web preview on http://localhost:${port}`));
+  const rawPort=process.env.PORT ?? '3000';
+  const port=Number(rawPort);
+  if(!Number.isInteger(port) || port<1 || port>65535){
+    console.error(`Invalid PORT: ${rawPort} (expected integer 1..65535)`);
+    process.exitCode=1;
+  } else {
+    const server=createServer();
+    server.on('error',err=>{
+      if(err.code==='EADDRINUSE') console.error(`PORT ${port} is in use. Set PORT to an available port or stop the old process.`);
+      else console.error(`Server startup failed: ${err.message}`);
+      process.exitCode=1;
+    });
+    server.listen(port,'0.0.0.0',()=>console.log(`MARKET PULSE web preview on http://localhost:${port}`));
+  }
 }
